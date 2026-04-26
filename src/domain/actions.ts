@@ -26,8 +26,11 @@ type CardContext = {
   seen_status: string;
   active_asin: string;
   active_links_count: number;
+  active_links: Array<{ asin: string; link_type: string }>;
   rejected: boolean;
+  rejected_reason: string;
   deferred: boolean;
+  deferred_reason: string;
 };
 
 type UndoableAction =
@@ -245,7 +248,8 @@ export async function getCardContext(wb_sku: string, wb_url: string): Promise<Ca
   const state = await getCardState(wb_sku);
   const links = await getAllByIndex<AsinLink>('asin_links', 'wb_sku', wb_sku);
   const wb = await upsertWbProduct(wb_sku, wb_url, {}, state.seenStatus === 'touched' ? 'touched' : 'seen');
-  return { wb_sku, wb_url, seen_status: wb.seen_status, active_asin: state.activeAsin, active_links_count: links.map(normalizeLink).filter((item) => item.wb_sku === wb_sku && isActiveLink(item)).length, rejected: parseBooleanLike(wb.rejected), deferred: parseBooleanLike(wb.deferred) };
+  const activeLinks = links.map(normalizeLink).filter((item) => item.wb_sku === wb_sku && isActiveLink(item));
+  return { wb_sku, wb_url, seen_status: wb.seen_status, active_asin: state.activeAsin, active_links_count: activeLinks.length, active_links: activeLinks.map((item) => ({ asin: item.asin, link_type: item.link_type })), rejected: parseBooleanLike(wb.rejected), rejected_reason: wb.rejected_reason, deferred: parseBooleanLike(wb.deferred), deferred_reason: wb.deferred_reason };
 }
 
 export async function exportCsvState(): Promise<Record<string, string>> { const result = await exportStateFiles(); await writeEvent('export', '', (await getMeta()).active_asin, { file_count: Object.keys(result.files).length }); return result.files; }
