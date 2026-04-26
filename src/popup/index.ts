@@ -6,15 +6,19 @@ const searchInput = document.getElementById('asin-search') as HTMLInputElement;
 const listEl = document.getElementById('asin-results') as HTMLUListElement;
 const forceScanBtn = document.getElementById('force-scan-btn') as HTMLButtonElement;
 const scanStatusEl = document.getElementById('scan-status') as HTMLSpanElement;
+const overlayPositionEl = document.getElementById('overlay-position') as HTMLSelectElement;
 
 type PopupStateResponse = { ok: boolean; amazonCount: number; activeAsin: string };
 type SearchResponse = { ok: boolean; results: Array<{ asin: string; title: string }> };
 type ForceScanResponse = { ok: boolean; foundLinks: number; extractedSkus: number; injectedOverlays: number };
+type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
 
 async function boot(): Promise<void> {
   const state = await sendMessage<PopupStateResponse>({ type: 'getPopupState' });
+  const overlay = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' });
   countEl.textContent = String(state.amazonCount ?? 0);
   activeEl.textContent = state.activeAsin || '—';
+  overlayPositionEl.value = overlay.position || 'top-left';
   await search();
 }
 
@@ -135,6 +139,21 @@ forceScanBtn.addEventListener('click', () => {
   void forceScanCurrentTab().catch((error: unknown) => {
     scanStatusEl.textContent = `Error: ${String(error)}`;
   });
+});
+
+overlayPositionEl.addEventListener('change', () => {
+  void (async () => {
+    const position = overlayPositionEl.value as OverlayPosition;
+    await sendMessage<{ ok: boolean }>({ type: 'setOverlayPosition', position });
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id) {
+      try {
+        await sendMessageToTab<{ ok: boolean }>(tabs[0].id, { type: 'overlayPositionSettingChanged', position });
+      } catch {
+        // ignore
+      }
+    }
+  })();
 });
 
 void boot();

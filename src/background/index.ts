@@ -13,6 +13,8 @@ type Request =
   | { type: 'exportState' }
   | { type: 'storageSummary' }
   | { type: 'clearDb' }
+  | { type: 'getOverlayPosition' }
+  | { type: 'setOverlayPosition'; position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto' }
   | { type: 'logDebug'; level?: 'info' | 'error'; action: string; details?: Record<string, unknown> };
 
 chrome.runtime.onMessage.addListener((message: Request, _sender: unknown, sendResponse: (response: unknown) => void) => {
@@ -72,7 +74,26 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
       getAll('events'),
       getMeta()
     ]);
-    return { summary: { amazon: amazon.length, wb: wb.length, links: links.length, events: events.length, activeAsin: meta.active_asin } };
+    return { summary: { amazon: amazon.length, wb: wb.length, links: links.length, events: events.length, activeAsin: meta.active_asin, overlayPosition: meta.overlay_position } };
+  }
+
+  if (message.type === 'getOverlayPosition') {
+    const meta = await getMeta();
+    return { position: meta.overlay_position || 'top-left' };
+  }
+
+  if (message.type === 'setOverlayPosition') {
+    const meta = await getMeta();
+    meta.overlay_position = message.position;
+    await putMany('meta', [meta]);
+    const entry: DebugEntry = {
+      ts: new Date().toISOString(),
+      level: 'info',
+      action: 'overlay_position_setting_changed',
+      details: { source: 'background', position: message.position }
+    };
+    await putMany('debug_log', [entry]);
+    return { position: message.position };
   }
 
   if (message.type === 'logDebug') {

@@ -14,6 +14,16 @@
   <h3>WB ⇄ Amazon</h3>
   <div>Imported Amazon products: <span id="amazon-count">0</span></div>
   <div>Active ASIN: <span id="active-asin">—</span></div>
+  <div style="margin-top:8px;">
+    Overlay position:
+    <select id="overlay-position">
+      <option value="top-left">Top-left</option>
+      <option value="top-right">Top-right</option>
+      <option value="bottom-left">Bottom-left</option>
+      <option value="bottom-right">Bottom-right</option>
+      <option value="auto">Auto</option>
+    </select>
+  </div>
   <div class="actions">
     <button id="force-scan-btn" type="button">Force scan current tab</button>
     <span id="scan-status"></span>

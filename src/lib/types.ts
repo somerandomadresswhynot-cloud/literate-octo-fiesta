@@ -61,6 +61,7 @@ export type MetaRecord = {
   data_revision: string;
   active_asin: string;
   default_link_type: string;
+  overlay_position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
   last_imported_at: string;
   last_exported_at: string;
 };
