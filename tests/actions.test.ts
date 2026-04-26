@@ -24,7 +24,7 @@ vi.mock('../src/lib/db.js', () => ({
   }
 }));
 
-import { addWbSkuToGroup, createGroup, getCardState, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, removeWbSkuFromGroup, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../src/domain/actions.js';
+import { addWbSkuToGroup, bulkAddToGroup, bulkDefer, bulkLinkToSelectedAsin, bulkReject, createGroup, getCardState, getHistoryBySku, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, removeWbSkuFromGroup, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../src/domain/actions.js';
 
 describe('domain actions', () => {
   beforeEach(() => { for (const key of Object.keys(stores)) stores[key] = []; });
@@ -129,5 +129,34 @@ describe('domain actions', () => {
     const state = await getCardState('200');
     expect(state.groupCount).toBe(2);
     expect(state.groupPreview.length).toBeGreaterThan(0);
+  });
+
+  test('bulk link no-conflict links all', async () => {
+    const s = await bulkLinkToSelectedAsin([{ wb_sku: '31', wb_url: 'u1' }, { wb_sku: '32', wb_url: 'u2' }], 'A31', 'candidate', 'skip_conflicts');
+    expect(s.succeeded).toBe(2);
+  });
+
+  test('bulk add to group skips duplicates', async () => {
+    const g = await createGroup({ name: 'bulk' });
+    await addWbSkuToGroup('41', 'u', g.group_id);
+    const s = await bulkAddToGroup([{ wb_sku: '41', wb_url: 'u' }, { wb_sku: '42', wb_url: 'u' }], g.group_id);
+    expect(s.succeeded).toBe(1);
+    expect(s.duplicates).toBe(1);
+  });
+
+  test('bulk reject/defer keep links and write events', async () => {
+    await linkWbSkuToAsin({ wb_sku: '51', wb_url: 'u', asin: 'A', createdByAction: 'add_to_asin' });
+    await bulkReject([{ wb_sku: '51', wb_url: 'u' }], 'bad_candidate', '');
+    await bulkDefer([{ wb_sku: '52', wb_url: 'u' }], 'unsure_match', '');
+    expect(stores.asin_links.find((x) => x.wb_sku === '51' && x.is_active === 'true')).toBeTruthy();
+    expect(stores.events.some((e) => e.event_type === 'bulk_action_started')).toBe(true);
+    expect(stores.events.some((e) => e.event_type === 'bulk_action_completed')).toBe(true);
+  });
+
+  test('history query by wb_sku works', async () => {
+    await markSeenByHover('61', 'u');
+    await markCardTouched('61', 'u', 'x');
+    const h = await getHistoryBySku('61', 100);
+    expect(h.events.length).toBeGreaterThan(0);
   });
 });
