@@ -4,25 +4,43 @@
   <meta charset="utf-8" />
   <title>WB Matcher Options</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 16px; max-width: 760px; }
+    body { font-family: Arial, sans-serif; margin: 16px; max-width: 860px; }
     .row { margin-bottom: 12px; }
-    button { margin-right: 8px; }
-    pre { background: #f6f6f6; padding: 12px; border-radius: 8px; }
+    button { margin-right: 8px; margin-top: 6px; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow-x: auto; }
+    .section { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+    .warn { color: #9a3d00; font-weight: bold; }
   </style>
 </head>
 <body>
   <h2>Local-first storage controls</h2>
-  <div class="row">
-    <input id="import-csv" type="file" accept=".csv,text/csv" />
-    <button id="import-btn">Import amazon_products.csv</button>
-    <div id="import-status"></div>
+
+  <div class="section">
+    <h3>Import data</h3>
+    <div class="row">
+      <input id="import-files" type="file" multiple accept=".csv,.json,text/csv,application/json" />
+      <div>Supported: amazon_products.csv, wb_products.csv, asin_links.csv, groups.csv, group_members.csv, events.csv, meta.json</div>
+      <button id="import-btn">Import selected files</button>
+      <button id="restore-btn">Restore from exported files</button>
+    </div>
+    <pre id="import-status"></pre>
   </div>
-  <div class="row">
-    <button id="export-btn">Export wb_products.csv + asin_links.csv + events.csv + meta.json + debug_log.json</button>
+
+  <div class="section">
+    <h3>Export data</h3>
+    <div class="row">
+      <button id="backup-btn">Create backup/export now</button>
+      <button id="export-btn">Export backup bundle</button>
+      <div id="export-status"></div>
+    </div>
   </div>
-  <div class="row">
-    <button id="clear-btn">Clear local IndexedDB</button>
+
+  <div class="section">
+    <h3>Danger zone</h3>
+    <div class="warn">Clearing local IndexedDB will permanently remove imported data and links unless you exported a backup.</div>
+    <button id="clear-btn">Clear local database</button>
   </div>
+
   <h3>Storage summary</h3>
   <pre id="summary"></pre>
   <script type="module" src="src/options/index.js"></script>

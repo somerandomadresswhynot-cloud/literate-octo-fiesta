@@ -7,8 +7,13 @@ describe('csv utils', () => {
     expect(rows).toEqual([{ asin: 'B001', title: 'Test' }]);
   });
 
-  test('toCsv escapes commas and quotes', () => {
-    const out = toCsv([{ a: 'x,y', b: '"z"' }], ['a', 'b']);
-    expect(out).toBe('a,b\n"x,y","""z"""');
+  test('parseCsv handles UTF-8 BOM', () => {
+    const rows = parseCsv('\ufeffasin,title\nB001,Test');
+    expect(rows[0].asin).toBe('B001');
+  });
+
+  test('toCsv escapes commas, quotes, and newlines', () => {
+    const out = toCsv([{ a: 'x,y', b: '"z"', c: 'line1\nline2' }], ['a', 'b', 'c']);
+    expect(out).toBe('a,b,c\n"x,y","""z""","line1\nline2"');
   });
 });

@@ -12,7 +12,7 @@ Local-first Chrome/Brave extension prototype for matching Wildberries SKUs to Am
 6. Click `A+` to link WB SKU to active ASIN.
 7. Save link to IndexedDB immediately.
 8. Show linked status on card (`A`).
-9. Export state files (`wb_products.csv`, `asin_links.csv`, `events.csv`, `meta.json`, `debug_log.json`).
+9. Export/backup full state files (`amazon_products.csv`, `wb_products.csv`, `asin_links.csv`, `groups.csv`, `group_members.csv`, `events.csv`, `meta.json`, `debug_log.json`).
 
 ## Tech
 
@@ -42,6 +42,8 @@ Object stores:
 - `amazon_products`
 - `wb_products`
 - `asin_links`
+- `groups`
+- `group_members`
 - `events`
 - `meta`
 - `debug_log`
@@ -125,6 +127,18 @@ npm run test
     - `debug_log.json`
 14. Open `asin_links.csv` and confirm new row contains clicked `wb_sku` + active `asin`.
 15. Open `debug_log.json` and confirm recent actions / counts / errors sections exist.
+
+## Manual backup/restore test (CSV State v2)
+
+1. Open **Options**.
+2. Import `amazon_products.csv` only.
+3. Open Popup and select one active ASIN.
+4. Open Wildberries listing and click **A+** on one product card.
+5. Return to Options and click **Create backup/export now**.
+6. Confirm exported files include all of: `amazon_products.csv`, `wb_products.csv`, `asin_links.csv`, `groups.csv`, `group_members.csv`, `events.csv`, `meta.json`, `debug_log.json`.
+7. Click **Clear local database** and confirm warning.
+8. Use **Restore from exported files** and select the exported CSV/JSON files.
+9. Verify storage summary repopulates, active ASIN is restored, and linked WB SKU exists again.
 
 ## Notes
 

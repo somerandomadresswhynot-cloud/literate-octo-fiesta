@@ -1,8 +1,8 @@
-import type { AmazonProduct, AsinLink, DebugEntry, EventRecord, MetaRecord, WbProduct } from './types.js';
+import type { AmazonProduct, AsinLink, DebugEntry, EventRecord, GroupMemberRecord, GroupRecord, MetaRecord, WbProduct } from './types.js';
 
 const DB_NAME = 'wb-amazon-local-db';
-const DB_VERSION = 1;
-const STORES = ['amazon_products', 'wb_products', 'asin_links', 'events', 'meta', 'debug_log'] as const;
+const DB_VERSION = 2;
+const STORES = ['amazon_products', 'wb_products', 'asin_links', 'groups', 'group_members', 'events', 'meta', 'debug_log'] as const;
 
 type StoreName = (typeof STORES)[number];
 
@@ -27,6 +27,8 @@ function getKeyPath(store: StoreName): string {
     case 'amazon_products': return 'asin';
     case 'wb_products': return 'wb_sku';
     case 'asin_links': return 'link_id';
+    case 'groups': return 'group_id';
+    case 'group_members': return 'member_id';
     case 'events': return 'event_id';
     case 'meta': return 'schema_version';
     case 'debug_log': return 'ts';
@@ -54,6 +56,16 @@ export async function getAll<T>(store: StoreName): Promise<T[]> {
   });
 }
 
+
+export async function clearStore(store: StoreName): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
 export async function clearDb(): Promise<void> {
   const db = await openDb();
   await Promise.all(STORES.map((store) => new Promise<void>((resolve, reject) => {
@@ -68,6 +80,8 @@ export type StateDump = {
   amazon_products: AmazonProduct[];
   wb_products: WbProduct[];
   asin_links: AsinLink[];
+  groups: GroupRecord[];
+  group_members: GroupMemberRecord[];
   events: EventRecord[];
   meta: MetaRecord[];
   debug_log: DebugEntry[];

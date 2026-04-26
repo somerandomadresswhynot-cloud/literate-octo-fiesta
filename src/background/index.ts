@@ -1,10 +1,12 @@
 import { parseCsv } from '../lib/csv.js';
-import { clearDb, getAll, putMany } from '../lib/db.js';
-import { exportCsvState, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, setActiveAsin } from '../domain/actions.js';
+import { getAll, putMany } from '../lib/db.js';
+import { getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, setActiveAsin } from '../domain/actions.js';
+import { clearDatabaseWithLog, exportStateFiles, importStateFiles } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 
 type Request =
   | { type: 'importAmazonCsv'; csvText: string }
+  | { type: 'importStateFiles'; files: Record<string, string>; mode?: 'import' | 'restore' }
   | { type: 'searchAsin'; query: string }
   | { type: 'setActiveAsin'; asin: string }
   | { type: 'getPopupState' }
@@ -29,6 +31,11 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
     const rows = parseCsv(message.csvText) as unknown as AmazonProduct[];
     await importAmazonProducts(rows);
     return { imported: rows.length };
+  }
+
+  if (message.type === 'importStateFiles') {
+    const summary = await importStateFiles(message.files, message.mode ?? 'import');
+    return { summary };
   }
 
   if (message.type === 'searchAsin') {
@@ -62,19 +69,21 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
   }
 
   if (message.type === 'exportState') {
-    const files = await exportCsvState();
-    return { files };
+    const exported = await exportStateFiles();
+    return { files: exported.files, backupName: exported.name };
   }
 
   if (message.type === 'storageSummary') {
-    const [amazon, wb, links, events, meta] = await Promise.all([
+    const [amazon, wb, links, groups, groupMembers, events, meta] = await Promise.all([
       getAll('amazon_products'),
       getAll('wb_products'),
       getAll('asin_links'),
+      getAll('groups'),
+      getAll('group_members'),
       getAll('events'),
       getMeta()
     ]);
-    return { summary: { amazon: amazon.length, wb: wb.length, links: links.length, events: events.length, activeAsin: meta.active_asin, overlayPosition: meta.overlay_position } };
+    return { summary: { amazon: amazon.length, wb: wb.length, links: links.length, groups: groups.length, groupMembers: groupMembers.length, events: events.length, activeAsin: meta.active_asin, overlayPosition: meta.overlay_position } };
   }
 
   if (message.type === 'getOverlayPosition') {
@@ -108,7 +117,7 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
   }
 
   if (message.type === 'clearDb') {
-    await clearDb();
+    await clearDatabaseWithLog();
     return {};
   }
 

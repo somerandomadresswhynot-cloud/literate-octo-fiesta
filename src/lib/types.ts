@@ -44,6 +44,24 @@ export type AsinLink = {
   created_by_action: string;
 };
 
+export type GroupRecord = {
+  group_id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string;
+};
+
+export type GroupMemberRecord = {
+  member_id: string;
+  group_id: string;
+  wb_sku: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string;
+};
+
 export type EventRecord = {
   event_id: string;
   operation_id: string;
