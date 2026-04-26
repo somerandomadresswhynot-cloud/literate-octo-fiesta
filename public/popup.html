@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WB ASIN Matcher</title>
+  <style>
+    body { font-family: Arial, sans-serif; width: 320px; margin: 10px; }
+    #asin-results { list-style: none; padding: 0; margin: 8px 0 0; max-height: 220px; overflow: auto; }
+    .result-item { width: 100%; text-align: left; font-size: 12px; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <h3>WB ⇄ Amazon</h3>
+  <div>Imported Amazon products: <span id="amazon-count">0</span></div>
+  <div>Active ASIN: <span id="active-asin">—</span></div>
+  <input id="asin-search" placeholder="Search ASIN/title/brand" style="width:100%;margin-top:8px" />
+  <ul id="asin-results"></ul>
+  <script type="module" src="src/popup/index.js"></script>
+</body>
+</html>

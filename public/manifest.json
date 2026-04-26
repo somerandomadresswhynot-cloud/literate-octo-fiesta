@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "WB ↔ Amazon ASIN Linker (Prototype)",
+  "version": "0.1.0",
+  "description": "Local-first MV3 prototype for linking Wildberries SKUs to active Amazon ASIN.",
+  "permissions": ["storage", "downloads"],
+  "host_permissions": ["https://www.wildberries.ru/*", "https://wildberries.ru/*"],
+  "background": {
+    "service_worker": "src/background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://www.wildberries.ru/*", "https://wildberries.ru/*"],
+      "js": ["src/content/index.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
