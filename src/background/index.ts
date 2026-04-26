@@ -1,6 +1,6 @@
 import { parseCsv } from '../lib/csv.js';
 import { clearStore, getAll, putMany } from '../lib/db.js';
-import { getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, setActiveAsin } from '../domain/actions.js';
+import { getCardContext, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, markCardTouched, markSeenByHover, recordLinkCopied, setActiveAsin, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
 import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, validateLocalState } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 import { shouldPersistDebug } from '../lib/logging.js';
@@ -13,6 +13,13 @@ type Request =
   | { type: 'getPopupState' }
   | { type: 'linkSku'; wb_sku: string; wb_url: string }
   | { type: 'getCardState'; wb_sku: string }
+  | { type: 'markSeenByHover'; wb_sku: string; wb_url: string }
+  | { type: 'markCardTouched'; wb_sku: string; wb_url: string; source: string }
+  | { type: 'recordLinkCopied'; wb_sku: string; wb_url: string }
+  | { type: 'setRejected'; wb_sku: string; wb_url: string; reasonCode: string; reasonText: string }
+  | { type: 'setDeferred'; wb_sku: string; wb_url: string; reasonCode: string; reasonText: string }
+  | { type: 'undoLastAction' }
+  | { type: 'getCardContext'; wb_sku: string; wb_url: string }
   | { type: 'exportState' }
   | { type: 'getExportData' }
   | { type: 'storageSummary' }
@@ -72,6 +79,40 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
 
   if (message.type === 'getCardState') {
     return await getCardState(message.wb_sku);
+  }
+
+
+  if (message.type === 'markSeenByHover') {
+    await markSeenByHover(message.wb_sku, message.wb_url);
+    return {};
+  }
+
+  if (message.type === 'markCardTouched') {
+    await markCardTouched(message.wb_sku, message.wb_url, message.source);
+    return {};
+  }
+
+  if (message.type === 'recordLinkCopied') {
+    await recordLinkCopied(message.wb_sku, message.wb_url);
+    return {};
+  }
+
+  if (message.type === 'setRejected') {
+    await setRejected(message.wb_sku, message.wb_url, message.reasonCode, message.reasonText);
+    return {};
+  }
+
+  if (message.type === 'setDeferred') {
+    await setDeferred(message.wb_sku, message.wb_url, message.reasonCode, message.reasonText);
+    return {};
+  }
+
+  if (message.type === 'undoLastAction') {
+    return await undoLastAction();
+  }
+
+  if (message.type === 'getCardContext') {
+    return { context: await getCardContext(message.wb_sku, message.wb_url) };
   }
 
   if (message.type === 'exportState') {

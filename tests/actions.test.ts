@@ -1,5 +1,16 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+const keyByStore: Record<string, string> = {
+  amazon_products: 'asin',
+  wb_products: 'wb_sku',
+  asin_links: 'link_id',
+  groups: 'group_id',
+  group_members: 'member_id',
+  events: 'event_id',
+  meta: 'schema_version',
+  debug_log: 'ts'
+};
+
 const stores: Record<string, any[]> = {
   amazon_products: [],
   wb_products: [],
@@ -15,7 +26,7 @@ vi.mock('../src/lib/db.js', () => ({
   getAll: async (store: string) => stores[store] ?? [],
   putMany: async (store: string, rows: any[]) => {
     for (const row of rows) {
-      const key = Object.keys(row)[0];
+      const key = keyByStore[store];
       const idx = (stores[store] ?? []).findIndex((item: any) => item[key] === row[key]);
       if (idx >= 0) stores[store][idx] = row;
       else stores[store] = [...(stores[store] ?? []), row];
@@ -23,11 +34,68 @@ vi.mock('../src/lib/db.js', () => ({
   }
 }));
 
-import { getCardState, linkWbSkuToActiveAsin, setActiveAsin } from '../src/domain/actions.js';
+import {
+  getCardState,
+  linkWbSkuToActiveAsin,
+  markCardTouched,
+  markSeenByHover,
+  setActiveAsin,
+  setDeferred,
+  setRejected,
+  undoLastAction
+} from '../src/domain/actions.js';
 
 describe('domain actions', () => {
   beforeEach(() => {
     for (const key of Object.keys(stores)) stores[key] = [];
+  });
+
+  test('seen_by_hover event is written once per sku', async () => {
+    await markSeenByHover('123', 'https://www.wildberries.ru/catalog/123/detail.aspx');
+    await markSeenByHover('123', 'https://www.wildberries.ru/catalog/123/detail.aspx');
+    expect(stores.events.filter((e) => e.event_type === 'seen_by_hover').length).toBe(1);
+  });
+
+  test('markCardTouched sets touched status', async () => {
+    await markCardTouched('123', 'https://www.wildberries.ru/catalog/123/detail.aspx', 'copy');
+    const state = await getCardState('123');
+    expect(state.seenStatus).toBe('touched');
+  });
+
+  test('reject updates wb_products and writes event', async () => {
+    await setRejected('555', 'https://www.wildberries.ru/catalog/555/detail.aspx', 'wrong_product', 'bad color');
+    expect(stores.wb_products[0].rejected).toBe('true');
+    expect(stores.wb_products[0].rejected_reason).toContain('wrong_product');
+    expect(stores.events.some((e) => e.event_type === 'rejected_set' && e.wb_sku === '555')).toBe(true);
+  });
+
+  test('defer updates wb_products and writes event', async () => {
+    await setDeferred('777', 'https://www.wildberries.ru/catalog/777/detail.aspx', 'check_photo', 'need zoom');
+    expect(stores.wb_products[0].deferred).toBe('true');
+    expect(stores.wb_products[0].deferred_reason).toContain('check_photo');
+    expect(stores.events.some((e) => e.event_type === 'deferred_set' && e.wb_sku === '777')).toBe(true);
+  });
+
+  test('undo link deactivates active link', async () => {
+    await setActiveAsin('B0TESTASIN');
+    await linkWbSkuToActiveAsin('900', 'https://www.wildberries.ru/catalog/900/detail.aspx');
+    const undo = await undoLastAction();
+    expect(undo.undone).toBe(true);
+    expect(stores.asin_links[0].is_active).toBe('false');
+  });
+
+  test('undo reject clears rejected state', async () => {
+    await setRejected('1000', 'https://www.wildberries.ru/catalog/1000/detail.aspx', 'duplicate', '');
+    await undoLastAction();
+    expect(stores.wb_products[0].rejected).toBe('false');
+    expect(stores.wb_products[0].rejected_reason).toBe('');
+  });
+
+  test('undo defer clears deferred state', async () => {
+    await setDeferred('1001', 'https://www.wildberries.ru/catalog/1001/detail.aspx', 'other', '');
+    await undoLastAction();
+    expect(stores.wb_products[0].deferred).toBe('false');
+    expect(stores.wb_products[0].deferred_reason).toBe('');
   });
 
   test('linkWbSkuToActiveAsin creates active link once', async () => {

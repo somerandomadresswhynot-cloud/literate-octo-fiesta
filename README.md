@@ -115,18 +115,22 @@ npm run test
 6. Search and click one ASIN to set active ASIN.
 7. Open `https://www.wildberries.ru/catalog/0/search.aspx?...` (any listing page).
 8. Scroll so product cards are visible.
-9. Verify compact overlay appears on cards with `A+` and status dot.
-10. Click `A+` on one card.
-11. Verify status changes to `A`.
-12. Open Options and click export button.
-13. Verify downloads exist:
+9. Verify compact overlay appears on cards with status marker, `A+`, and `⋯` menu.
+10. Hover one card for at least 1.2 seconds and verify seen marker appears (`👁`).
+11. Open `⋯` menu and click **Copy WB URL**. Verify toast `WB link copied` appears.
+12. Open `⋯` menu and click **Reject**. Pick reason and verify marker changes to `×`.
+13. Click **Undo** on the toast and verify reject is reverted.
+14. Open `⋯` menu and click **Defer / check later**. Pick reason and verify marker changes to `?`.
+15. Click `A+` on one card and verify status changes to `A`.
+16. Open Options and click export button.
+17. Verify downloads exist:
     - `wb_products.csv`
     - `asin_links.csv`
     - `events.csv`
     - `meta.json`
     - `debug_log.json`
-14. Open `asin_links.csv` and confirm new row contains clicked `wb_sku` + active `asin`.
-15. Open `debug_log.json` and confirm recent actions / counts / errors sections exist.
+18. Open `wb_products.csv` and confirm rejected/deferred/seen_status fields are updated.
+19. Open `events.csv` and confirm events include hover/copy/reject/defer/undo actions.
 
 ## Manual backup/restore test (CSV State v2)
 

@@ -5,7 +5,7 @@ const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
 const ROOT_ID = 'wb-asin-overlay-root';
 
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
-type MarkerState = 'A' | 'a' | '·' | '?' | '!';
+type MarkerState = 'A' | 'a' | '·' | '○' | '?' | '×' | '👁' | '!';
 
 type OverlayEntry = {
   sku: string;
@@ -15,6 +15,9 @@ type OverlayEntry = {
   overlayElement: HTMLDivElement;
   statusElement: HTMLSpanElement;
   buttonElement: HTMLButtonElement;
+  menuButtonElement: HTMLButtonElement;
+  menuElement: HTMLDivElement;
+  hoverTimer: number | null;
 };
 
 declare global {
@@ -27,6 +30,7 @@ class OverlayManager {
   private readonly root: HTMLDivElement;
   private readonly shadow: ShadowRoot;
   private readonly layer: HTMLDivElement;
+  private readonly toastLayer: HTMLDivElement;
   private readonly overlays = new Map<string, OverlayEntry>();
   private readonly pendingLinks = new Set<string>();
   private updateQueued = false;
@@ -38,6 +42,8 @@ class OverlayManager {
     this.shadow = this.root.shadowRoot ?? this.root.attachShadow({ mode: 'open' });
     this.layer = document.createElement('div');
     this.layer.className = 'overlay-layer';
+    this.toastLayer = document.createElement('div');
+    this.toastLayer.className = 'toast-layer';
     this.mountShadow();
   }
 
@@ -71,21 +77,63 @@ class OverlayManager {
     btn.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      void this.handleLinkClick(sku);
+      void this.handleActionTouch(sku, 'link_button').then(() => this.handleLinkClick(sku));
     });
 
-    overlay.append(status, btn);
+    const menuBtn = document.createElement('button');
+    menuBtn.className = 'wb-amz-menu-btn';
+    menuBtn.type = 'button';
+    menuBtn.textContent = '⋯';
+    menuBtn.title = 'Card actions';
+
+    const menu = this.buildMenu(sku);
+    menuBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = menu.style.display !== 'block';
+      menu.style.display = open ? 'block' : 'none';
+      if (open) {
+        void logContent('card_menu_opened', { sku });
+      }
+    });
+
+    document.addEventListener('click', () => {
+      menu.style.display = 'none';
+    });
+
+    overlay.append(status, btn, menuBtn, menu);
     this.layer.appendChild(overlay);
-    this.overlays.set(sku, {
+
+    const entry: OverlayEntry = {
       sku,
       wbUrl,
       linkElement: anchor,
       cardElement: card,
       overlayElement: overlay,
       statusElement: status,
-      buttonElement: btn
+      buttonElement: btn,
+      menuButtonElement: menuBtn,
+      menuElement: menu,
+      hoverTimer: null
+    };
+
+    card.addEventListener('mouseenter', () => {
+      if (entry.hoverTimer !== null) return;
+      entry.hoverTimer = window.setTimeout(() => {
+        entry.hoverTimer = null;
+        void sendMessage({ type: 'markSeenByHover', wb_sku: sku, wb_url: entry.wbUrl })
+          .then(() => this.refreshCardState(sku, status))
+          .catch(() => {});
+      }, 1200);
+    });
+    card.addEventListener('mouseleave', () => {
+      if (entry.hoverTimer !== null) {
+        clearTimeout(entry.hoverTimer);
+        entry.hoverTimer = null;
+      }
     });
 
+    this.overlays.set(sku, entry);
     void this.refreshCardState(sku, status);
   }
 
@@ -120,16 +168,41 @@ class OverlayManager {
     });
   }
 
+  private showToast(message: string, withUndo = false): void {
+    const toast = document.createElement('div');
+    toast.className = 'wb-amz-toast';
+    const text = document.createElement('span');
+    text.textContent = message;
+    toast.appendChild(text);
+
+    if (withUndo) {
+      const undoBtn = document.createElement('button');
+      undoBtn.type = 'button';
+      undoBtn.textContent = 'Undo';
+      undoBtn.addEventListener('click', async () => {
+        const result = await sendMessage<{ ok: boolean; undone: boolean }>({ type: 'undoLastAction' });
+        if (result.undone) {
+          this.showToast('Action undone');
+          for (const [sku, entry] of this.overlays.entries()) {
+            void this.refreshCardState(sku, entry.statusElement);
+          }
+        }
+      });
+      toast.appendChild(undoBtn);
+    }
+
+    this.toastLayer.appendChild(toast);
+    void logContent('toast_shown', { message, withUndo });
+    window.setTimeout(() => toast.remove(), 3200);
+  }
+
   private updatePositions(reason: string): void {
     const viewport = { width: window.innerWidth, height: window.innerHeight };
-    let visibleCount = 0;
-    let removedCount = 0;
 
     for (const [sku, entry] of this.overlays.entries()) {
       if (!entry.cardElement.isConnected || !entry.linkElement.isConnected) {
         entry.overlayElement.remove();
         this.overlays.delete(sku);
-        removedCount += 1;
         continue;
       }
 
@@ -141,7 +214,7 @@ class OverlayManager {
 
       const placement = this.resolvePlacement(entry.cardElement, cardRect, viewport);
       const overlayRect = entry.overlayElement.getBoundingClientRect();
-      const width = overlayRect.width || 56;
+      const width = overlayRect.width || 90;
       const height = overlayRect.height || 28;
       const margin = 8;
 
@@ -156,14 +229,9 @@ class OverlayManager {
       entry.overlayElement.style.display = 'inline-flex';
       entry.overlayElement.style.left = `${Math.round(left)}px`;
       entry.overlayElement.style.top = `${Math.round(top)}px`;
-      visibleCount += 1;
     }
 
-    void logContent('overlay_position_updated', { reason, visible_count: visibleCount });
-    void logContent('overlay_visible_count', { reason, count: visibleCount });
-    if (removedCount > 0) {
-      void logContent('overlay_removed_count', { reason, count: removedCount });
-    }
+    void logContent('overlay_position_updated', { reason, visible_count: this.overlays.size });
   }
 
   private resolvePlacement(card: HTMLElement, rect: DOMRect, viewport: { width: number; height: number }): Exclude<OverlayPosition, 'auto'> {
@@ -171,7 +239,6 @@ class OverlayManager {
 
     const topLeftBlocked = this.hasTopLeftBadge(card) || rect.left + 56 > viewport.width || rect.top + 28 > viewport.height;
     if (!topLeftBlocked) return 'top-left';
-
     if (!this.hasTopRightFavorite(card)) return 'top-right';
     if (rect.bottom - 28 >= 0) return 'bottom-right';
     return 'bottom-left';
@@ -204,24 +271,29 @@ class OverlayManager {
     return anchor;
   }
 
-  private async handleLinkClick(sku: string): Promise<void> {
+  private async handleActionTouch(sku: string, source: string): Promise<void> {
     const entry = this.overlays.get(sku);
     if (!entry) return;
-    if (this.pendingLinks.has(sku)) return;
+    await sendMessage({ type: 'markCardTouched', wb_sku: sku, wb_url: entry.wbUrl, source });
+  }
+
+  private async handleLinkClick(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku);
+    if (!entry || this.pendingLinks.has(sku)) return;
 
     this.pendingLinks.add(sku);
     entry.buttonElement.disabled = true;
     entry.buttonElement.textContent = '...';
     try {
       const response = await sendMessage<{ ok: boolean; result: { status: 'created' | 'duplicate_skipped' } }>({ type: 'linkSku', wb_sku: sku, wb_url: entry.wbUrl });
-      if (response.result?.status === 'duplicate_skipped') {
-        this.setMarker(entry, 'a');
-      } else {
-        this.setMarker(entry, 'A');
+      this.setMarker(entry, response.result?.status === 'duplicate_skipped' ? 'a' : 'A');
+      if (response.result?.status === 'created') {
+        this.showToast('Linked to active ASIN', true);
       }
       await this.refreshCardState(sku, entry.statusElement);
     } catch (error) {
       this.setMarker(entry, '!');
+      this.showToast(`Link failed: ${String(error)}`);
       await logContent('link_click_error', { sku, error: String(error) });
     } finally {
       entry.buttonElement.disabled = false;
@@ -230,12 +302,116 @@ class OverlayManager {
     }
   }
 
+  private async copyWbUrl(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku);
+    if (!entry) return;
+    await this.handleActionTouch(sku, 'copy_wb_url');
+    try {
+      await navigator.clipboard.writeText(entry.wbUrl);
+      await sendMessage({ type: 'recordLinkCopied', wb_sku: sku, wb_url: entry.wbUrl });
+      this.showToast('WB link copied');
+      await this.refreshCardState(sku, entry.statusElement);
+    } catch (error) {
+      await logContent('wb_link_copied_error', { sku, error: String(error) });
+      this.showToast(`Copy failed: ${String(error)}`);
+    }
+  }
+
+  private async rejectCard(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku);
+    if (!entry) return;
+    const reasonCode = this.promptWithOptions('Reject reason', ['wrong_product', 'wrong_size', 'other_brand', 'bad_candidate', 'duplicate', 'not_interesting', 'other']);
+    if (!reasonCode) return;
+    const reasonText = window.prompt('Optional reject note', '') ?? '';
+    await this.handleActionTouch(sku, 'reject');
+    await sendMessage({ type: 'setRejected', wb_sku: sku, wb_url: entry.wbUrl, reasonCode, reasonText });
+    this.showToast('Product rejected', true);
+    await this.refreshCardState(sku, entry.statusElement);
+  }
+
+  private async deferCard(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku);
+    if (!entry) return;
+    const reasonCode = this.promptWithOptions('Defer reason', ['compare_size', 'check_photo', 'unsure_match', 'check_seller', 'other']);
+    if (!reasonCode) return;
+    const reasonText = window.prompt('Optional defer note', '') ?? '';
+    await this.handleActionTouch(sku, 'defer');
+    await sendMessage({ type: 'setDeferred', wb_sku: sku, wb_url: entry.wbUrl, reasonCode, reasonText });
+    this.showToast('Deferred for later', true);
+    await this.refreshCardState(sku, entry.statusElement);
+  }
+
+  private async showContext(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku);
+    if (!entry) return;
+    const response = await sendMessage<{ ok: boolean; context: { wb_sku: string; wb_url: string; seen_status: string; active_asin: string; active_links_count: number; rejected: boolean; deferred: boolean } }>({ type: 'getCardContext', wb_sku: sku, wb_url: entry.wbUrl });
+    const c = response.context;
+    window.alert([
+      `WB SKU: ${c.wb_sku}`,
+      `WB URL: ${c.wb_url}`,
+      `seen_status: ${c.seen_status || '(none)'}`,
+      `active ASIN: ${c.active_asin || '(none)'}`,
+      `active links count: ${c.active_links_count}`,
+      `rejected: ${c.rejected}`,
+      `deferred: ${c.deferred}`
+    ].join('\n'));
+  }
+
+  private buildMenu(sku: string): HTMLDivElement {
+    const menu = document.createElement('div');
+    menu.className = 'wb-amz-menu';
+
+    const item = (label: string, fn: () => Promise<void>) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        menu.style.display = 'none';
+        void fn();
+      });
+      return btn;
+    };
+
+    menu.append(
+      item('Link to active ASIN', async () => this.handleLinkClick(sku)),
+      item('Copy WB URL', async () => this.copyWbUrl(sku)),
+      item('Reject', async () => this.rejectCard(sku)),
+      item('Defer / check later', async () => this.deferCard(sku)),
+      item('Show context', async () => this.showContext(sku))
+    );
+
+    return menu;
+  }
+
+  private promptWithOptions(title: string, options: string[]): string | null {
+    const input = window.prompt(`${title}: ${options.join(', ')}`, options[0]);
+    if (!input) return null;
+    const value = input.trim();
+    if (options.includes(value)) return value;
+    this.showToast(`Unknown option. Use one of: ${options.join(', ')}`);
+    return null;
+  }
+
   private async refreshCardState(sku: string, statusEl: HTMLSpanElement): Promise<void> {
     try {
-      const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean }>({ type: 'getCardState', wb_sku: sku });
-      statusEl.textContent = state.activeAsinLinked ? 'A' : state.linked ? 'a' : '·';
+      const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean }>({ type: 'getCardState', wb_sku: sku });
+      if (state.rejected) {
+        statusEl.textContent = '×';
+      } else if (state.deferred) {
+        statusEl.textContent = '?';
+      } else if (state.activeAsinLinked) {
+        statusEl.textContent = 'A';
+      } else if (state.linked) {
+        statusEl.textContent = 'a';
+      } else if (state.seenStatus === 'seen' || state.seenStatus === 'touched') {
+        statusEl.textContent = '👁';
+      } else {
+        statusEl.textContent = '·';
+      }
     } catch {
-      statusEl.textContent = '?';
+      statusEl.textContent = '○';
     }
   }
 
@@ -254,7 +430,6 @@ class OverlayManager {
     root.style.pointerEvents = 'none';
     root.style.zIndex = '2147483646';
     document.body.appendChild(root);
-    void logContent('overlay_root_created', { id: ROOT_ID });
     return root;
   }
 
@@ -276,7 +451,7 @@ class OverlayManager {
         pointer-events: auto;
         font-family: Arial, sans-serif;
       }
-      .wb-amz-btn {
+      .wb-amz-btn, .wb-amz-menu-btn {
         border: 1px solid #5f20d4;
         color: #fff;
         background: #7a38ff;
@@ -287,20 +462,70 @@ class OverlayManager {
         padding: 4px 7px;
         cursor: pointer;
       }
+      .wb-amz-menu-btn { padding: 4px 6px; }
       .wb-amz-btn:disabled { opacity: 0.6; cursor: wait; }
       .wb-amz-status {
         color: #5f20d4;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
-        min-width: 10px;
+        min-width: 12px;
         text-align: center;
       }
+      .wb-amz-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        min-width: 150px;
+        background: #fff;
+        border: 1px solid #c8b7ff;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+        display: none;
+        z-index: 2;
+      }
+      .wb-amz-menu button {
+        display: block;
+        width: 100%;
+        border: none;
+        background: transparent;
+        text-align: left;
+        padding: 7px 9px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .wb-amz-menu button:hover { background: #f5f0ff; }
+      .toast-layer {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        pointer-events: none;
+      }
+      .wb-amz-toast {
+        pointer-events: auto;
+        background: #1f1437;
+        color: #fff;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .wb-amz-toast button {
+        border: 1px solid #fff;
+        background: transparent;
+        color: #fff;
+        border-radius: 6px;
+        padding: 2px 6px;
+        cursor: pointer;
+      }
     `;
-    this.shadow.append(style, this.layer);
+    this.shadow.append(style, this.layer, this.toastLayer);
   }
 }
-
-console.log('[WB-ASIN] content script loaded', location.href);
 
 if (!window[CONTENT_BOOT_FLAG]) {
   window[CONTENT_BOOT_FLAG] = true;
