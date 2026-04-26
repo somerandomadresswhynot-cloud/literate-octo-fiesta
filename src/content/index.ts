@@ -4,6 +4,8 @@ const CLASS_NAME = 'wb-amz-overlay';
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
 const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
 
+console.log('[WB-ASIN] content script loaded', location.href);
+
 type ScanStats = {
   linksFound: number;
   skuExtracted: number;
@@ -27,6 +29,10 @@ if (!window[CONTENT_BOOT_FLAG]) {
 
 function startContentScript(): void {
   chrome.runtime.onMessage.addListener((message: { type?: string }, _sender, sendResponse) => {
+    if (message.type === 'pingContentScript') {
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'forceScan') {
       const stats = scan('popup_force_scan');
       sendResponse({ ok: true, foundLinks: stats.linksFound, extractedSkus: stats.skuExtracted, injectedOverlays: stats.overlaysInjected });

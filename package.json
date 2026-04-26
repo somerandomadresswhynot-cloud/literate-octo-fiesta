@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-static.mjs",
+    "build": "npm run clean && node scripts/build.mjs && node scripts/validate-dist.mjs",
     "clean": "node scripts/clean.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

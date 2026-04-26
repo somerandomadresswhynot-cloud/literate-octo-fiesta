@@ -51,38 +51,43 @@ async function forceScanCurrentTab(): Promise<void> {
     return;
   }
 
+  let pingOk = false;
   try {
-    const response = await sendMessageToTab<ForceScanResponse>(activeTab.id, { type: 'forceScan' });
-    scanStatusEl.textContent = `Scan OK: links=${response.foundLinks}, skus=${response.extractedSkus}, injected=${response.injectedOverlays}`;
-    await logPopup('force_scan_retry_result', { result: 'initial_success', ...response });
-    return;
+    await sendMessageToTab<{ ok: boolean }>(activeTab.id, { type: 'pingContentScript' });
+    pingOk = true;
   } catch (error) {
     const message = String(error);
-    await logPopup('force_scan_send_failed', { error: message });
+    await logPopup('force_scan_send_failed', { stage: 'initial_ping', error: message });
     if (!message.includes('Receiving end does not exist')) {
       scanStatusEl.textContent = `Error: ${message}`;
       return;
     }
   }
 
-  await executeContentScriptFallback(activeTab.id);
-  await logPopup('content_script_injected_fallback', { tab_id: activeTab.id });
-
-  try {
-    const retry = await sendMessageToTab<ForceScanResponse>(activeTab.id, { type: 'forceScan' });
-    scanStatusEl.textContent = `Scan OK: links=${retry.foundLinks}, skus=${retry.extractedSkus}, injected=${retry.injectedOverlays}`;
-    await logPopup('force_scan_retry_result', { result: 'retry_success', ...retry });
-  } catch (error) {
-    scanStatusEl.textContent = `Retry failed: ${String(error)}`;
-    await logPopup('force_scan_retry_result', { result: 'retry_failed', error: String(error) });
+  if (!pingOk) {
+    await executeContentScriptFallback(activeTab.id);
+    await logPopup('content_script_injected_fallback', { tab_id: activeTab.id, file: 'content.js' });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    try {
+      await sendMessageToTab<{ ok: boolean }>(activeTab.id, { type: 'pingContentScript' });
+      pingOk = true;
+    } catch (error) {
+      scanStatusEl.textContent = `Retry ping failed: ${String(error)}`;
+      await logPopup('force_scan_retry_result', { result: 'retry_ping_failed', error: String(error) });
+      return;
+    }
   }
+
+  const scanResponse = await sendMessageToTab<ForceScanResponse>(activeTab.id, { type: 'forceScan' });
+  scanStatusEl.textContent = `Scan OK: links=${scanResponse.foundLinks}, skus=${scanResponse.extractedSkus}, injected=${scanResponse.injectedOverlays}`;
+  await logPopup('force_scan_retry_result', { result: pingOk ? 'scan_success' : 'scan_unknown', ...scanResponse });
 }
 
 async function executeContentScriptFallback(tabId: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     chrome.scripting.executeScript({
       target: { tabId },
-      files: ['src/content/index.js']
+      files: ['content.js']
     }, () => {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
@@ -127,7 +132,9 @@ searchInput.addEventListener('input', () => {
 });
 
 forceScanBtn.addEventListener('click', () => {
-  void forceScanCurrentTab();
+  void forceScanCurrentTab().catch((error: unknown) => {
+    scanStatusEl.textContent = `Error: ${String(error)}`;
+  });
 });
 
 void boot();
