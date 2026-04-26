@@ -5,7 +5,7 @@ const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
 const ROOT_ID = 'wb-asin-overlay-root';
 
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
-type MarkerState = 'A' | 'a' | '·' | '○' | '?' | '×' | '👁' | '!';
+type MarkerState = 'A' | 'a' | 'A!' | '·' | '○' | '?' | '×' | '👁' | '!';
 
 type OverlayEntry = {
   sku: string;
@@ -285,11 +285,7 @@ class OverlayManager {
     entry.buttonElement.disabled = true;
     entry.buttonElement.textContent = '...';
     try {
-      const response = await sendMessage<{ ok: boolean; result: { status: 'created' | 'duplicate_skipped' } }>({ type: 'linkSku', wb_sku: sku, wb_url: entry.wbUrl });
-      this.setMarker(entry, response.result?.status === 'duplicate_skipped' ? 'a' : 'A');
-      if (response.result?.status === 'created') {
-        this.showToast('Linked to active ASIN', true);
-      }
+      await this.linkWithFlow({ sku, wbUrl: entry.wbUrl, asin: '', useActiveAsin: true, linkType: undefined, source: 'A+' });
       await this.refreshCardState(sku, entry.statusElement);
     } catch (error) {
       this.setMarker(entry, '!');
@@ -300,6 +296,67 @@ class OverlayManager {
       entry.buttonElement.textContent = 'A+';
       this.pendingLinks.delete(sku);
     }
+  }
+
+  private async linkWithFlow(params: { sku: string; wbUrl: string; asin: string; useActiveAsin: boolean; linkType?: string; source: 'A+' | 'menu' }): Promise<void> {
+    let payload: Record<string, unknown> = params.useActiveAsin
+      ? { type: 'linkSku', wb_sku: params.sku, wb_url: params.wbUrl }
+      : { type: 'linkSkuToAsin', wb_sku: params.sku, wb_url: params.wbUrl, asin: params.asin, linkType: params.linkType };
+
+    while (true) {
+      const response = await sendMessage<{ ok: boolean; result: { status: string; existing_links?: Array<{ asin: string; link_type: string }> } }>(payload);
+      const status = response.result?.status;
+      if (status === 'created') {
+        this.showToast('Link created', true);
+        return;
+      }
+      if (status === 'duplicate_skipped') {
+        this.showToast('Link already exists');
+        return;
+      }
+      if (status === 'rejected_confirmation_required') {
+        await logContent('rejected_link_warning_shown', { sku: params.sku });
+        const decision = window.prompt('This product is rejected. Type: cancel | keep | clear', 'cancel')?.trim().toLowerCase();
+        if (!decision || decision === 'cancel') return;
+        payload = { ...(payload as any), rejectedResolution: decision === 'clear' ? 'clear_rejected' : 'keep_rejected' };
+        continue;
+      }
+      if (status === 'conflict_detected') {
+        await logContent('conflict_detected', { sku: params.sku, existing_count: response.result.existing_links?.length || 0 });
+        const summary = (response.result.existing_links || []).map((x) => `${x.asin} (${x.link_type})`).join(', ');
+        const decision = window.prompt(`Conflict. Existing links: ${summary}. Type: cancel | add | replace`, 'cancel')?.trim().toLowerCase();
+        if (!decision || decision === 'cancel') {
+          await logContent('conflict_cancelled', { sku: params.sku });
+          return;
+        }
+        payload = { ...(payload as any), conflictResolution: decision === 'replace' ? 'replace_existing' : 'add_second_link' };
+        continue;
+      }
+      return;
+    }
+  }
+
+  private async addToAsin(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku);
+    if (!entry) return;
+    await logContent('asin_search_opened', { sku });
+    const query = window.prompt('Find ASIN (asin/title/brand/category/keywords/comment/workflow_status)', '') ?? '';
+    await logContent('asin_search_query', { sku, query });
+    const search = await sendMessage<{ ok: boolean; results: Array<{ asin: string; title: string; brand: string; comment: string; workflow_status: string }> }>({ type: 'searchAsin', query });
+    await logContent('asin_search_result_count', { sku, count: search.results.length });
+    if (!search.results.length) {
+      this.showToast('No ASIN found');
+      return;
+    }
+    const options = search.results.slice(0, 8).map((x, i) => `${i + 1}) ${x.asin} — ${x.title || ''}`).join('\n');
+    const picked = Number(window.prompt(`Pick ASIN number:\n${options}`, '1') || '0');
+    const chosen = search.results[picked - 1];
+    if (!chosen) return;
+    const linkType = this.promptWithOptions('Link type', ['candidate', 'exact_match', 'similar', 'competitor', 'wrong_size', 'wrong_product']) ?? 'candidate';
+    await logContent('link_type_changed', { sku, link_type: linkType });
+    await logContent('add_to_asin_selected', { sku, asin: chosen.asin, link_type: linkType });
+    await this.linkWithFlow({ sku, wbUrl: entry.wbUrl, asin: chosen.asin, linkType, useActiveAsin: false, source: 'menu' });
+    await this.refreshCardState(sku, entry.statusElement);
   }
 
   private async copyWbUrl(sku: string): Promise<void> {
@@ -346,21 +403,12 @@ class OverlayManager {
     if (!entry) return;
     const response = await sendMessage<{ ok: boolean; context: { wb_sku: string; wb_url: string; seen_status: string; active_asin: string; active_links_count: number; rejected: boolean; deferred: boolean } }>({ type: 'getCardContext', wb_sku: sku, wb_url: entry.wbUrl });
     const c = response.context;
-    window.alert([
-      `WB SKU: ${c.wb_sku}`,
-      `WB URL: ${c.wb_url}`,
-      `seen_status: ${c.seen_status || '(none)'}`,
-      `active ASIN: ${c.active_asin || '(none)'}`,
-      `active links count: ${c.active_links_count}`,
-      `rejected: ${c.rejected}`,
-      `deferred: ${c.deferred}`
-    ].join('\n'));
+    window.alert([`WB SKU: ${c.wb_sku}`, `WB URL: ${c.wb_url}`, `seen_status: ${c.seen_status || '(none)'}`, `active ASIN: ${c.active_asin || '(none)'}`, `active links count: ${c.active_links_count}`, `rejected: ${c.rejected}`, `deferred: ${c.deferred}`].join('\n'));
   }
 
   private buildMenu(sku: string): HTMLDivElement {
     const menu = document.createElement('div');
     menu.className = 'wb-amz-menu';
-
     const item = (label: string, fn: () => Promise<void>) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -376,12 +424,12 @@ class OverlayManager {
 
     menu.append(
       item('Link to active ASIN', async () => this.handleLinkClick(sku)),
+      item('Add to ASIN...', async () => this.addToAsin(sku)),
       item('Copy WB URL', async () => this.copyWbUrl(sku)),
       item('Reject', async () => this.rejectCard(sku)),
       item('Defer / check later', async () => this.deferCard(sku)),
       item('Show context', async () => this.showContext(sku))
     );
-
     return menu;
   }
 
@@ -396,13 +444,15 @@ class OverlayManager {
 
   private async refreshCardState(sku: string, statusEl: HTMLSpanElement): Promise<void> {
     try {
-      const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean }>({ type: 'getCardState', wb_sku: sku });
+      const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean }>({ type: 'getCardState', wb_sku: sku });
       if (state.rejected) {
         statusEl.textContent = '×';
       } else if (state.deferred) {
         statusEl.textContent = '?';
       } else if (state.activeAsinLinked) {
         statusEl.textContent = 'A';
+      } else if (state.conflictPotential) {
+        statusEl.textContent = 'A!';
       } else if (state.linked) {
         statusEl.textContent = 'a';
       } else if (state.seenStatus === 'seen' || state.seenStatus === 'touched') {

@@ -88,4 +88,14 @@ describe('state import/export', () => {
     expect(Boolean(deactivated.deleted_at)).toBe(true);
   });
 
+  test('export preserves inactive replaced links', async () => {
+    stores.asin_links = [
+      { link_id: '1', wb_sku: 'sku', asin: 'A1', link_type: 'candidate', is_active: 'false', comment: '', created_at: '', updated_at: '', deleted_at: '2026-01-01', created_by_action: 'A+' },
+      { link_id: '2', wb_sku: 'sku', asin: 'A2', link_type: 'exact_match', is_active: 'true', comment: '', created_at: '', updated_at: '', deleted_at: '', created_by_action: 'A+' }
+    ];
+    const exported = await exportStateFiles();
+    expect(exported.files['asin_links.csv']).toContain('1,sku,A1,candidate,false');
+    expect(exported.files['asin_links.csv']).toContain('2,sku,A2,exact_match,true');
+  });
+
 });
