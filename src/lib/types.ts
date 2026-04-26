@@ -83,6 +83,10 @@ export type MetaRecord = {
   active_asin: string;
   default_link_type: string;
   overlay_position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
+  card_controls_position?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+  card_controls_offset_x?: string;
+  card_controls_offset_y?: string;
+  card_controls_prefer_above_overlays?: 'true' | 'false';
   last_imported_at: string;
   last_exported_at: string;
   verbose_scan_logging: 'true' | 'false';

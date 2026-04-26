@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { filterAndRankAsinResults } from '../src/lib/asinSearch.js';
-import { buildReasonPayload, buildStatusTooltip, categorizeBulkConflict, computeFloatingMenuPosition, mapConflictResolution, normalizeCardControlsCount } from '../src/content/ui-helpers.js';
+import { buildReasonPayload, buildStatusTooltip, categorizeBulkConflict, computeCardControlsPositionStyle, computeFloatingMenuPosition, mapConflictResolution, normalizeCardControlsCount, shouldReparentCardControls } from '../src/content/ui-helpers.js';
 
 describe('ui foundation helpers', () => {
   test('asin ranking defaults keep active first', () => {
@@ -43,5 +43,17 @@ describe('ui foundation helpers', () => {
   test('menu position helper keeps dropdown in viewport bounds', () => {
     expect(computeFloatingMenuPosition({ left: 2, bottom: 20, viewportWidth: 400 })).toEqual({ left: 8, top: 24 });
     expect(computeFloatingMenuPosition({ left: 390, bottom: 40, viewportWidth: 400 })).toEqual({ left: 180, top: 44 });
+  });
+
+  test('bring-to-front helper requires reparent when not last child', () => {
+    expect(shouldReparentCardControls(false)).toBe(true);
+    expect(shouldReparentCardControls(true)).toBe(false);
+  });
+
+  test('position style helper supports all corners', () => {
+    expect(computeCardControlsPositionStyle('top-left', 8, 6)).toEqual({ left: '8px', right: 'auto', top: '6px', bottom: 'auto' });
+    expect(computeCardControlsPositionStyle('top-right', 8, 6)).toEqual({ left: 'auto', right: '8px', top: '6px', bottom: 'auto' });
+    expect(computeCardControlsPositionStyle('bottom-left', 8, 6)).toEqual({ left: '8px', right: 'auto', top: 'auto', bottom: '6px' });
+    expect(computeCardControlsPositionStyle('bottom-right', 8, 6)).toEqual({ left: 'auto', right: '8px', top: 'auto', bottom: '6px' });
   });
 });

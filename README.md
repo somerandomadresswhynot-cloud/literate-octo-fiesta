@@ -148,6 +148,16 @@ npm run test
 22. Open `events.csv` and confirm events include hover/copy/reject/defer/undo actions.
 23. Download diagnostic snapshot from Options and confirm file is produced.
 
+## Manual test: MPStats/WB overlay collision handling
+
+1. Open Wildberries with MPStats extension enabled.
+2. Confirm WB-ASIN controls are visible above MPStats/WB overlays.
+3. Scroll quickly and confirm controls move naturally with cards.
+4. Click `A+` on cards with MPStats overlays.
+5. Open `⋯` menu on cards with MPStats overlays.
+6. Change placement/offset setting in popup and verify controls move.
+7. Select cards with checkbox and run one bulk action from the floating panel.
+
 ## Manual backup/restore test (CSV State v2)
 
 1. Open **Options**.

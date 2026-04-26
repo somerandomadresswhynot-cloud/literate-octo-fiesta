@@ -1,5 +1,5 @@
 import { sendMessage } from '../lib/runtime.js';
-import { buildReasonPayload, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS } from './ui-helpers.js';
+import { buildReasonPayload, computeCardControlsPositionStyle, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS, shouldReparentCardControls } from './ui-helpers.js';
 
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
 const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
@@ -7,8 +7,10 @@ const ROOT_ID = 'wb-asin-overlay-root';
 const LINK_TYPES = ['candidate', 'exact_match', 'similar', 'competitor', 'wrong_size', 'wrong_product'] as const;
 
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
+type CardPlacement = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 type MarkerState = 'A' | 'a' | 'A!' | '·' | '○' | '?' | '×' | '👁' | '!' | '≡';
 type SearchResult = { asin: string; title: string; brand: string; comment: string; workflow_status: string };
+type CardControlsSettings = { placement: CardPlacement; offsetX: number; offsetY: number; preferAboveOverlays: boolean };
 
 type OverlayEntry = {
   sku: string; wbUrl: string; linkElement: HTMLAnchorElement; cardElement: HTMLElement; overlayElement: HTMLDivElement;
@@ -42,6 +44,7 @@ class OverlayManager {
   private restoreFocusEl: HTMLElement | null = null;
   private updateQueued = false;
   private overlayPosition: OverlayPosition = 'top-left';
+  private cardControlsSettings: CardControlsSettings = { placement: 'top-left', offsetX: 8, offsetY: 8, preferAboveOverlays: true };
   private readonly cardSelectors = 'article, li, [data-nm-id], [class*="card"], [class*="product"], [class*="goods"]';
 
   constructor() {
@@ -64,6 +67,7 @@ class OverlayManager {
 
   async init(): Promise<void> {
     await this.refreshOverlayPositionSetting();
+    await this.refreshCardControlsSettings();
     await this.refreshPanelContext();
     this.panelButton.addEventListener('click', () => {
       const open = this.panel.classList.toggle('open');
@@ -91,6 +95,8 @@ class OverlayManager {
       existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl;
       if (!card.contains(existing.overlayElement)) card.appendChild(existing.overlayElement);
       this.ensureCardSupportsAttachedControls(card);
+      this.applyCardControlPosition(existing.overlayElement);
+      this.bringCardControlsToFront(card, existing.overlayElement, 'card_updated');
       void logContent('card_controls_updated', { sku });
       return;
     }
@@ -115,7 +121,9 @@ class OverlayManager {
     select.addEventListener('change', async () => { await this.handleActionTouch(sku, 'select'); this.toggleSelection(sku, select.checked); });
     if (!duplicate) overlay.append(select, status, btn, menuBtn);
     this.ensureCardSupportsAttachedControls(card);
+    this.applyCardControlPosition(overlay);
     card.appendChild(overlay);
+    this.bringCardControlsToFront(card, overlay, 'initial_attach');
 
     const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null, lastCardState: '' };
     card.addEventListener('mouseenter', () => {
@@ -160,6 +168,8 @@ class OverlayManager {
 
   private async openMenu(sku: string, trigger: HTMLButtonElement): Promise<void> {
     this.closeModal(); this.closeMenu();
+    const entry = this.overlays.get(sku);
+    if (entry) this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'before_menu_open');
     const menu = await this.buildMenu(sku);
     const rect = trigger.getBoundingClientRect();
     const pos = computeFloatingMenuPosition({ left: rect.left, bottom: rect.bottom, viewportWidth: window.innerWidth });
@@ -200,9 +210,45 @@ class OverlayManager {
 
   getOverlayCount(): number { return this.overlays.size; }
 
-  async setOverlayPosition(position: OverlayPosition): Promise<void> { if (this.overlayPosition === position) return; this.overlayPosition = position; await logContent('overlay_position_setting_changed', { position }); this.schedulePositionUpdate('position_setting_changed'); }
-  async refreshOverlayPositionSetting(): Promise<void> { try { const response = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' }); if (response.position) this.overlayPosition = response.position; } catch { this.overlayPosition = 'top-left'; } }
+  async setOverlayPosition(position: OverlayPosition): Promise<void> {
+    if (this.overlayPosition === position) return;
+    this.overlayPosition = position;
+    if (position !== 'auto') this.cardControlsSettings.placement = position;
+    await logContent('overlay_position_setting_changed', { position });
+    this.schedulePositionUpdate('position_setting_changed');
+  }
+  async refreshOverlayPositionSetting(): Promise<void> {
+    try {
+      const response = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' });
+      if (response.position) {
+        this.overlayPosition = response.position;
+        if (response.position !== 'auto') this.cardControlsSettings.placement = response.position;
+      }
+    } catch { this.overlayPosition = 'top-left'; }
+  }
+  async refreshCardControlsSettings(): Promise<void> {
+    try {
+      const response = await sendMessage<{ ok: boolean; settings: CardControlsSettings }>({ type: 'getCardControlsSettings' });
+      if (response.settings) this.cardControlsSettings = response.settings;
+    } catch {}
+  }
+  async setCardControlsSettings(settings: CardControlsSettings): Promise<void> {
+    this.cardControlsSettings = settings;
+    await logContent('card_controls_position_setting_changed', settings);
+    for (const entry of this.overlays.values()) {
+      this.applyCardControlPosition(entry.overlayElement);
+      this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'settings_changed');
+    }
+  }
   schedulePositionUpdate(reason: string): void { if (this.updateQueued) return; this.updateQueued = true; requestAnimationFrame(() => { this.updateQueued = false; this.updatePositions(reason); }); }
+  private applyCardControlPosition(overlay: HTMLDivElement): void {
+    const pos = computeCardControlsPositionStyle(this.cardControlsSettings.placement, this.cardControlsSettings.offsetX, this.cardControlsSettings.offsetY);
+    overlay.style.left = pos.left;
+    overlay.style.right = pos.right;
+    overlay.style.top = pos.top;
+    overlay.style.bottom = pos.bottom;
+    overlay.classList.toggle('wb-asin-prefer-above', this.cardControlsSettings.preferAboveOverlays);
+  }
 
   private showToast(message: string, undoType?: 'link_created' | 'rejected_set' | 'deferred_set' | 'group_added' | 'group_removed'): void {
     const toast = document.createElement('div'); toast.className = 'wb-amz-toast';
@@ -530,6 +576,8 @@ class OverlayManager {
   private async handleActionTouch(sku: string, source: string): Promise<void> { const entry = this.overlays.get(sku); if (!entry) return; await sendMessage({ type: 'markCardTouched', wb_sku: sku, wb_url: entry.wbUrl, source }); }
   private async refreshCardState(sku: string, statusEl: HTMLSpanElement): Promise<void> {
     try {
+      const entry = this.overlays.get(sku);
+      if (entry) this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'before_state_refresh');
       const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean; groupCount: number; groupPreview: string[] }>({ type: 'getCardState', wb_sku: sku });
       statusEl.textContent =
         state.activeAsinLinked ? 'A'
@@ -550,6 +598,7 @@ class OverlayManager {
         ctx.context.seen_status ? `Seen: ${ctx.context.seen_status}` : ''
       ].filter(Boolean);
       statusEl.title = titleParts.join('\n');
+      if (entry) this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'after_state_refresh');
       await this.updatePageStats();
     } catch { statusEl.textContent = '○'; }
   }
@@ -596,6 +645,8 @@ class OverlayManager {
         entry.cardElement.classList.remove('wb-asin-card-selected');
         this.overlays.delete(sku);
         void logContent('card_controls_removed', { sku, reason });
+      } else if (reason === 'mutation' || reason === 'initial' || reason === 'interval' || reason === 'resize') {
+        this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, reason);
       }
     }
   }
@@ -606,6 +657,19 @@ class OverlayManager {
       }
     } catch (error) {
       void logContent('card_controls_attach_failed', { error: String(error) });
+    }
+  }
+  private bringCardControlsToFront(card: HTMLElement, controls: HTMLDivElement, reason: string): void {
+    if (!card.isConnected || !controls.isConnected) return;
+    if (controls.parentElement !== card) {
+      card.appendChild(controls);
+      void logContent('card_controls_reparented', { reason });
+      return;
+    }
+    const isLast = card.lastElementChild === controls;
+    if (shouldReparentCardControls(isLast)) {
+      card.appendChild(controls);
+      void logContent('card_controls_brought_to_front', { reason });
     }
   }
   private resolvePlacement(card: HTMLElement, rect: DOMRect, viewport: { width: number; height: number }): Exclude<OverlayPosition, 'auto'> {
@@ -645,8 +709,9 @@ class OverlayManager {
     if (document.getElementById('wb-asin-card-controls-style')) return;
     const style = document.createElement('style');
     style.id = 'wb-asin-card-controls-style';
-    style.textContent = `.wb-asin-card-controls{all:initial;position:absolute;left:8px;top:8px;display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.96);border:1px solid #7a38ff;border-radius:10px;padding:3px 6px;box-shadow:0 2px 6px rgba(30,20,60,.2);pointer-events:auto;z-index:20;font-family:Arial,sans-serif;box-sizing:border-box}.wb-asin-card-controls *{box-sizing:border-box;font-family:Arial,sans-serif}.wb-asin-card-controls.selected{outline:2px solid #18a058}.wb-asin-card-controls .wb-amz-select{margin:0}.wb-asin-card-selected{outline:2px solid rgba(24,160,88,.25);outline-offset:-2px}`;
+    style.textContent = `.wb-asin-card-controls{position:absolute !important;display:inline-flex !important;align-items:center !important;gap:4px !important;background:rgba(255,255,255,.97) !important;border:1px solid #7a38ff !important;border-radius:10px !important;padding:3px 6px !important;box-shadow:0 3px 10px rgba(30,20,60,.28) !important;pointer-events:none !important;z-index:2147483647 !important;font-family:Arial,sans-serif !important;box-sizing:border-box !important}.wb-asin-card-controls.wb-asin-prefer-above{box-shadow:0 4px 12px rgba(30,20,60,.36) !important;border-color:#5f20d4 !important;background:#fff !important}.wb-asin-card-controls button,.wb-asin-card-controls input,.wb-asin-card-controls [role="button"]{all:initial;pointer-events:auto !important;box-sizing:border-box !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls .wb-amz-btn,.wb-asin-card-controls .wb-amz-menu-btn{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-asin-card-controls .wb-amz-menu-btn{padding:4px 6px}.wb-asin-card-controls .wb-amz-status{all:initial;color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center;cursor:pointer;pointer-events:auto !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls.selected{outline:2px solid #18a058}.wb-asin-card-controls .wb-amz-select{margin:0}.wb-asin-card-selected{outline:2px solid rgba(24,160,88,.25);outline-offset:-2px}`;
     document.head.appendChild(style);
+    void logContent('card_controls_zindex_applied', { z_index: 2147483647 });
   }
 }
 
@@ -654,10 +719,11 @@ if (!window[CONTENT_BOOT_FLAG]) { window[CONTENT_BOOT_FLAG] = true; void startCo
 
 async function startContentScript(): Promise<void> {
   const manager = new OverlayManager(); await manager.init(); await logContent('content_script_loaded', { url: location.href, ready_state: document.readyState });
-  chrome.runtime.onMessage.addListener((message: { type?: string; position?: OverlayPosition }, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message: { type?: string; position?: OverlayPosition; settings?: CardControlsSettings }, _sender, sendResponse) => {
     if (message.type === 'pingContentScript') { sendResponse({ ok: true }); return true; }
     if (message.type === 'forceScan') { const stats = scan(manager, 'popup_force_scan'); sendResponse({ ok: true, foundLinks: stats.linksFound, extractedSkus: stats.skuExtracted, injectedOverlays: stats.overlaysInjected }); return true; }
     if (message.type === 'overlayPositionSettingChanged' && message.position) { void manager.setOverlayPosition(message.position); sendResponse({ ok: true }); return true; }
+    if (message.type === 'cardControlsSettingsChanged' && message.settings) { void manager.setCardControlsSettings(message.settings); sendResponse({ ok: true }); return true; }
     return false;
   });
   let pendingReason = 'initial'; let scanTimer: number | null = null;

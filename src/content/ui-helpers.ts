@@ -34,6 +34,21 @@ export function computeFloatingMenuPosition(input: { left: number; bottom: numbe
   };
 }
 
+export type CardControlsPlacement = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+
+export function computeCardControlsPositionStyle(placement: CardControlsPlacement, xOffset: number, yOffset: number): { left: string; right: string; top: string; bottom: string } {
+  const x = `${Math.max(0, xOffset)}px`;
+  const y = `${Math.max(0, yOffset)}px`;
+  if (placement === 'top-right') return { left: 'auto', right: x, top: y, bottom: 'auto' };
+  if (placement === 'bottom-left') return { left: x, right: 'auto', top: 'auto', bottom: y };
+  if (placement === 'bottom-right') return { left: 'auto', right: x, top: 'auto', bottom: y };
+  return { left: x, right: 'auto', top: y, bottom: 'auto' };
+}
+
+export function shouldReparentCardControls(cardLastElementIsControls: boolean): boolean {
+  return !cardLastElementIsControls;
+}
+
 export function categorizeBulkConflict(items: Array<{ linksCount: number; linkedToTarget: boolean; linkedToOther: boolean; rejected: boolean; deferred: boolean }>): { noConflict: number; alreadyLinked: number; linkedOther: number; rejected: number; deferred: number; multipleLinks: number } {
   return items.reduce((acc, item) => {
     if (item.linksCount === 0) acc.noConflict += 1;

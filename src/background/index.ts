@@ -48,6 +48,8 @@ type Request =
   | { type: 'setVerboseLogging'; enabled: boolean }
   | { type: 'getOverlayPosition' }
   | { type: 'setOverlayPosition'; position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto' }
+  | { type: 'getCardControlsSettings' }
+  | { type: 'setCardControlsSettings'; settings: { placement: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'; offsetX: number; offsetY: number; preferAboveOverlays: boolean } }
   | { type: 'logDebug'; level?: 'info' | 'error'; action: string; details?: Record<string, unknown> };
 
 
@@ -279,6 +281,27 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
     await putMany('meta', [meta]);
     await writeDebugEntry({ ts: new Date().toISOString(), level: 'info', action: 'overlay_position_setting_changed', details: { source: 'background', position: message.position } });
     return { position: message.position };
+  }
+  if (message.type === 'getCardControlsSettings') {
+    const meta = await getMeta();
+    return {
+      settings: {
+        placement: (meta.card_controls_position || meta.overlay_position || 'top-left') as 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right',
+        offsetX: Number(meta.card_controls_offset_x || '8') || 8,
+        offsetY: Number(meta.card_controls_offset_y || '8') || 8,
+        preferAboveOverlays: (meta.card_controls_prefer_above_overlays || 'true') !== 'false'
+      }
+    };
+  }
+  if (message.type === 'setCardControlsSettings') {
+    const meta = await getMeta();
+    meta.card_controls_position = message.settings.placement;
+    meta.card_controls_offset_x = String(Math.max(0, Math.min(36, Number(message.settings.offsetX) || 0)));
+    meta.card_controls_offset_y = String(Math.max(0, Math.min(36, Number(message.settings.offsetY) || 0)));
+    meta.card_controls_prefer_above_overlays = message.settings.preferAboveOverlays ? 'true' : 'false';
+    await putMany('meta', [meta]);
+    await writeDebugEntry({ ts: new Date().toISOString(), level: 'info', action: 'card_controls_position_setting_changed', details: { source: 'background', settings: message.settings } });
+    return { settings: message.settings };
   }
 
   if (message.type === 'logDebug') {
