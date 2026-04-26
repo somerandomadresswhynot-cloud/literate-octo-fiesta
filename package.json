@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.json && node scripts/copy-static.mjs",
-    "clean": "rm -rf dist",
+    "clean": "node scripts/clean.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
