@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WB Matcher Options</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; max-width: 760px; }
+    .row { margin-bottom: 12px; }
+    button { margin-right: 8px; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Local-first storage controls</h2>
+  <div class="row">
+    <input id="import-csv" type="file" accept=".csv,text/csv" />
+    <button id="import-btn">Import amazon_products.csv</button>
+    <div id="import-status"></div>
+  </div>
+  <div class="row">
+    <button id="export-btn">Export wb_products.csv + asin_links.csv + events.csv + meta.json + debug_log.json</button>
+  </div>
+  <div class="row">
+    <button id="clear-btn">Clear local IndexedDB</button>
+  </div>
+  <h3>Storage summary</h3>
+  <pre id="summary"></pre>
+  <script type="module" src="src/options/index.js"></script>
+</body>
+</html>

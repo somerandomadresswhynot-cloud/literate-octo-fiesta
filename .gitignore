@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# keep extension source library directory
+!src/lib/
+!src/lib/**
