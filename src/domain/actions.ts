@@ -125,6 +125,7 @@ export async function getMeta(): Promise<MetaRecord> {
     data_revision: '1',
     active_asin: '',
     default_link_type: 'candidate',
+    overlay_position: 'top-left',
     last_imported_at: '',
     last_exported_at: ''
   };
