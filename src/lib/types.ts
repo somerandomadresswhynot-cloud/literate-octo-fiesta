@@ -47,16 +47,19 @@ export type AsinLink = {
 export type GroupRecord = {
   group_id: string;
   name: string;
-  description: string;
+  icon: string;
+  comment: string;
+  group_type: string;
   created_at: string;
   updated_at: string;
   deleted_at: string;
 };
 
 export type GroupMemberRecord = {
-  member_id: string;
+  membership_id: string;
   group_id: string;
   wb_sku: string;
+  wb_url: string;
   created_at: string;
   updated_at: string;
   deleted_at: string;

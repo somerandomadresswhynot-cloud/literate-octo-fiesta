@@ -20,8 +20,8 @@ const headers: Record<StoreKey, string[]> = {
   amazon_products: ['asin', 'amazon_url', 'title', 'brand', 'image_url', 'category', 'keywords', 'comment', 'priority', 'workflow_status', 'checked_result', 'last_checked_at', 'created_at', 'updated_at'],
   wb_products: ['wb_sku', 'wb_url', 'seen_status', 'first_seen_at', 'last_seen_at', 'last_touched_at', 'rejected', 'rejected_reason', 'deferred', 'deferred_reason', 'created_at', 'updated_at', 'deleted_at'],
   asin_links: ['link_id', 'wb_sku', 'asin', 'link_type', 'is_active', 'comment', 'created_at', 'updated_at', 'deleted_at', 'created_by_action'],
-  groups: ['group_id', 'name', 'description', 'created_at', 'updated_at', 'deleted_at'],
-  group_members: ['member_id', 'group_id', 'wb_sku', 'created_at', 'updated_at', 'deleted_at'],
+  groups: ['group_id', 'name', 'icon', 'comment', 'group_type', 'created_at', 'updated_at', 'deleted_at'],
+  group_members: ['membership_id', 'group_id', 'wb_sku', 'wb_url', 'created_at', 'updated_at', 'deleted_at'],
   events: ['event_id', 'operation_id', 'event_type', 'wb_sku', 'asin', 'group_id', 'payload_json', 'created_at', 'client_id']
 };
 
@@ -144,6 +144,14 @@ export async function importStateFiles(files: FileMap, mode: 'import' | 'restore
       pushWarn(summary, `events payload_json invalid for event_id=${event.event_id || 'unknown'}`);
     }
   }
+  const groupRows = (parsed.groups ?? []) as GroupRecord[];
+  const activeGroupIds = new Set(groupRows.filter((g) => !isDeleted(g)).map((g) => g.group_id));
+  const groupMemberRows = (parsed.group_members ?? []) as GroupMemberRecord[];
+  for (const member of groupMemberRows) {
+    if (!isDeleted(member) && member.group_id && !activeGroupIds.has(member.group_id)) {
+      pushWarn(summary, `orphan group_member: ${member.membership_id}`);
+    }
+  }
 
   const writes: Array<Promise<void>> = [];
   if (parsed.amazon_products) {
@@ -162,14 +170,12 @@ export async function importStateFiles(files: FileMap, mode: 'import' | 'restore
     summary.skipped_rows += parsed.asin_links.length - cleanLinks.length;
   }
   if (parsed.groups) {
-    const rows = parsed.groups as GroupRecord[];
-    writes.push(replaceStore('groups', rows));
-    summary.imported.groups = rows.length;
+    writes.push(replaceStore('groups', groupRows));
+    summary.imported.groups = groupRows.length;
   }
   if (parsed.group_members) {
-    const rows = parsed.group_members as GroupMemberRecord[];
-    writes.push(replaceStore('group_members', rows));
-    summary.imported.group_members = rows.length;
+    writes.push(replaceStore('group_members', groupMemberRows));
+    summary.imported.group_members = groupMemberRows.length;
   }
   if (parsed.events) {
     writes.push(replaceStore('events', eventsRows));
@@ -298,8 +304,20 @@ export async function validateLocalState(): Promise<ValidationResult> {
   if (!meta?.schema_version) warnings.push('meta missing schema_version');
   if (meta?.active_asin && !asinSet.has(meta.active_asin)) warnings.push(`meta active_asin not found in amazon_products: ${meta.active_asin}`);
   const groupIds = new Set(groups.filter((g) => !isDeleted(g)).map((g) => g.group_id));
+  const deletedGroupIds = new Set(groups.filter((g) => isDeleted(g)).map((g) => g.group_id));
+  const activeMemberships = new Map<string, GroupMemberRecord[]>();
   for (const member of groupMembers) {
-    if (!isDeleted(member) && member.group_id && !groupIds.has(member.group_id)) warnings.push(`orphan group_member: ${member.member_id}`);
+    if (!isDeleted(member) && member.group_id && !groupIds.has(member.group_id)) warnings.push(`orphan group_member: ${member.membership_id}`);
+    if (!isDeleted(member) && member.group_id && deletedGroupIds.has(member.group_id)) warnings.push(`group_member points to deleted group: ${member.membership_id}`);
+    if (!isDeleted(member)) {
+      const key = `${member.group_id}::${member.wb_sku}`;
+      const bucket = activeMemberships.get(key) ?? [];
+      bucket.push(member);
+      activeMemberships.set(key, bucket);
+    }
+  }
+  for (const [key, bucket] of activeMemberships.entries()) {
+    if (bucket.length > 1) warnings.push(`duplicate active group membership for ${key}: ${bucket.length}`);
   }
   for (const d of debugLogs) {
     if (!d.debug_log_id) warnings.push(`debug log missing id at ts=${d.ts}`);
@@ -397,12 +415,18 @@ export async function validateAllInOneBackupPayload(payload: unknown): Promise<{
   if (!Array.isArray(obj.amazon_products)) fatalErrors.push('amazon_products missing or invalid');
   if (!Array.isArray(obj.wb_products)) fatalErrors.push('wb_products missing or invalid');
   if (!Array.isArray(obj.asin_links)) fatalErrors.push('asin_links missing or invalid');
+  if (!Array.isArray(obj.groups)) fatalErrors.push('groups missing or invalid');
+  if (!Array.isArray(obj.group_members)) fatalErrors.push('group_members missing or invalid');
   if (!Array.isArray(obj.events)) fatalErrors.push('events missing or invalid');
   if (!obj.meta || typeof obj.meta !== 'object') fatalErrors.push('meta missing or invalid');
   const asinSet = new Set((obj.amazon_products || []).map((x) => x.asin));
   for (const link of obj.asin_links || []) {
     const normalized = normalizeLink(link);
     if (normalized.asin && !asinSet.has(normalized.asin)) warnings.push(`link points to unknown ASIN: ${normalized.link_id}/${normalized.asin}`);
+  }
+  const activeGroupIds = new Set((obj.groups || []).filter((g) => !g.deleted_at).map((g) => g.group_id));
+  for (const member of obj.group_members || []) {
+    if (!member.deleted_at && member.group_id && !activeGroupIds.has(member.group_id)) warnings.push(`orphan group_member: ${member.membership_id}`);
   }
   const summary = {
     amazon_products: obj.amazon_products?.length || 0,

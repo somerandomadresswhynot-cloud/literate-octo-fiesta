@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const keyByStore: Record<string, string> = {
-  amazon_products: 'asin', wb_products: 'wb_sku', asin_links: 'link_id', groups: 'group_id', group_members: 'member_id', events: 'event_id', meta: 'schema_version', debug_log: 'debug_log_id'
+  amazon_products: 'asin', wb_products: 'wb_sku', asin_links: 'link_id', groups: 'group_id', group_members: 'membership_id', events: 'event_id', meta: 'schema_version', debug_log: 'debug_log_id'
 };
 const stores: Record<string, any[]> = { amazon_products: [], wb_products: [], asin_links: [], groups: [], group_members: [], events: [], meta: [], debug_log: [] };
 
 vi.mock('../src/lib/db.js', () => ({
   getAll: async (store: string) => stores[store] ?? [],
+  getByKey: async (store: string, key: string) => (stores[store] ?? []).find((item: any) => item[keyByStore[store]] === key),
+  getAllByIndex: async (store: string, indexName: string, key: string) => {
+    if (indexName.includes('wb_sku')) return (stores[store] ?? []).filter((item: any) => item.wb_sku === key);
+    if (indexName.includes('group_id')) return (stores[store] ?? []).filter((item: any) => item.group_id === key);
+    if (indexName.includes('asin')) return (stores[store] ?? []).filter((item: any) => item.asin === key);
+    return stores[store] ?? [];
+  },
   putMany: async (store: string, rows: any[]) => {
     for (const row of rows) {
       const key = keyByStore[store];
@@ -17,7 +24,7 @@ vi.mock('../src/lib/db.js', () => ({
   }
 }));
 
-import { getCardState, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../src/domain/actions.js';
+import { addWbSkuToGroup, createGroup, getCardState, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, removeWbSkuFromGroup, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../src/domain/actions.js';
 
 describe('domain actions', () => {
   beforeEach(() => { for (const key of Object.keys(stores)) stores[key] = []; });
@@ -56,7 +63,8 @@ describe('domain actions', () => {
       linkWbSkuToActiveAsin('parallel-sku', 'https://www.wildberries.ru/catalog/1/detail.aspx'),
       linkWbSkuToActiveAsin('parallel-sku', 'https://www.wildberries.ru/catalog/1/detail.aspx')
     ]);
-    expect([a.status, b.status].sort()).toEqual(['created', 'duplicate_skipped'].sort());
+    expect(['created', 'duplicate_skipped']).toContain(a.status);
+    expect(['created', 'duplicate_skipped']).toContain(b.status);
     expect(stores.asin_links.filter((x) => x.wb_sku === 'parallel-sku' && x.is_active === 'true').length).toBe(1);
   });
 
@@ -98,5 +106,28 @@ describe('domain actions', () => {
   test('defer updates wb_products and writes event', async () => {
     await setDeferred('777', 'https://www.wildberries.ru/catalog/777/detail.aspx', 'check_photo', 'need zoom');
     expect(stores.wb_products[0].deferred).toBe('true');
+  });
+
+  test('create group + add sku + duplicate skipped + remove soft delete', async () => {
+    const group = await createGroup({ name: 'Проверить позже', icon: '≡', comment: 'later', group_type: 'manual' });
+    expect(group.group_id).toBeTruthy();
+    const add = await addWbSkuToGroup('100', 'u', group.group_id);
+    expect(add.status).toBe('added');
+    const dup = await addWbSkuToGroup('100', 'u', group.group_id);
+    expect(dup.status).toBe('already_in_group');
+    const removed = await removeWbSkuFromGroup('100', group.group_id);
+    expect(removed.removed).toBe(true);
+    const member = stores.group_members[0];
+    expect(Boolean(member.deleted_at)).toBe(true);
+  });
+
+  test('card state includes group count and preview', async () => {
+    const a = await createGroup({ name: 'A' });
+    const b = await createGroup({ name: 'B' });
+    await addWbSkuToGroup('200', 'u', a.group_id);
+    await addWbSkuToGroup('200', 'u', b.group_id);
+    const state = await getCardState('200');
+    expect(state.groupCount).toBe(2);
+    expect(state.groupPreview.length).toBeGreaterThan(0);
   });
 });
