@@ -8,18 +8,26 @@ const forceScanBtn = document.getElementById('force-scan-btn') as HTMLButtonElem
 const scanStatusEl = document.getElementById('scan-status') as HTMLSpanElement;
 const overlayPositionEl = document.getElementById('overlay-position') as HTMLSelectElement;
 const defaultLinkTypeEl = document.getElementById('default-link-type') as HTMLSelectElement;
+const cardOffsetXEl = document.getElementById('card-offset-x') as HTMLInputElement;
+const cardOffsetYEl = document.getElementById('card-offset-y') as HTMLInputElement;
+const preferAboveOverlaysEl = document.getElementById('prefer-above-overlays') as HTMLInputElement;
 
 type PopupStateResponse = { ok: boolean; amazonCount: number; activeAsin: string; defaultLinkType: string; linkTypes: string[] };
 type SearchResponse = { ok: boolean; results: Array<{ asin: string; title: string; brand: string; comment: string; workflow_status: string }>; activeAsin: string; linkTypes: string[] };
 type ForceScanResponse = { ok: boolean; foundLinks: number; extractedSkus: number; injectedOverlays: number };
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
+type CardControlsSettings = { placement: Exclude<OverlayPosition, 'auto'>; offsetX: number; offsetY: number; preferAboveOverlays: boolean };
 
 async function boot(): Promise<void> {
   const state = await sendMessage<PopupStateResponse>({ type: 'getPopupState' });
   const overlay = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' });
+  const cardControls = await sendMessage<{ ok: boolean; settings: CardControlsSettings }>({ type: 'getCardControlsSettings' });
   countEl.textContent = String(state.amazonCount ?? 0);
   activeEl.textContent = state.activeAsin || '—';
   overlayPositionEl.value = overlay.position || 'top-left';
+  cardOffsetXEl.value = String(cardControls.settings?.offsetX ?? 8);
+  cardOffsetYEl.value = String(cardControls.settings?.offsetY ?? 8);
+  preferAboveOverlaysEl.checked = cardControls.settings?.preferAboveOverlays ?? true;
   defaultLinkTypeEl.innerHTML = '';
   for (const lt of state.linkTypes || []) {
     const opt = document.createElement('option');
@@ -79,7 +87,25 @@ async function logPopup(action: string, details: Record<string, unknown>): Promi
 
 searchInput.addEventListener('input', () => { void search(); });
 forceScanBtn.addEventListener('click', () => { void forceScanCurrentTab().catch((error: unknown) => { scanStatusEl.textContent = `Error: ${String(error)}`; }); });
-overlayPositionEl.addEventListener('change', () => { void (async () => { const position = overlayPositionEl.value as OverlayPosition; await sendMessage<{ ok: boolean }>({ type: 'setOverlayPosition', position }); const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); if (tabs[0]?.id) { try { await sendMessageToTab<{ ok: boolean }>(tabs[0].id, { type: 'overlayPositionSettingChanged', position }); } catch {} } })(); });
+overlayPositionEl.addEventListener('change', () => { void (async () => { const position = overlayPositionEl.value as OverlayPosition; await sendMessage<{ ok: boolean }>({ type: 'setOverlayPosition', position }); const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); if (tabs[0]?.id) { try { await sendMessageToTab<{ ok: boolean }>(tabs[0].id, { type: 'overlayPositionSettingChanged', position }); } catch {} } syncCardControlsSettings(); })(); });
+const syncCardControlsSettings = (): void => {
+  void (async () => {
+    const settings: CardControlsSettings = {
+      placement: (overlayPositionEl.value === 'auto' ? 'top-left' : overlayPositionEl.value) as Exclude<OverlayPosition, 'auto'>,
+      offsetX: Math.max(0, Math.min(36, Number(cardOffsetXEl.value) || 0)),
+      offsetY: Math.max(0, Math.min(36, Number(cardOffsetYEl.value) || 0)),
+      preferAboveOverlays: preferAboveOverlaysEl.checked
+    };
+    await sendMessage<{ ok: boolean }>({ type: 'setCardControlsSettings', settings });
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id) {
+      try { await sendMessageToTab<{ ok: boolean }>(tabs[0].id, { type: 'cardControlsSettingsChanged', settings }); } catch {}
+    }
+  })();
+};
+cardOffsetXEl.addEventListener('change', syncCardControlsSettings);
+cardOffsetYEl.addEventListener('change', syncCardControlsSettings);
+preferAboveOverlaysEl.addEventListener('change', syncCardControlsSettings);
 defaultLinkTypeEl.addEventListener('change', () => { void sendMessage({ type: 'setDefaultLinkType', linkType: defaultLinkTypeEl.value }); });
 
 void boot();

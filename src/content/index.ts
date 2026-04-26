@@ -1,5 +1,5 @@
 import { sendMessage } from '../lib/runtime.js';
-import { buildReasonPayload, DEFER_REASONS, mapConflictResolution, REJECT_REASONS } from './ui-helpers.js';
+import { buildReasonPayload, cardControlsRootStyle, computeAbsoluteControlPlacement, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS, toDocumentCoordinates } from './ui-helpers.js';
 
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
 const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
@@ -7,12 +7,15 @@ const ROOT_ID = 'wb-asin-overlay-root';
 const LINK_TYPES = ['candidate', 'exact_match', 'similar', 'competitor', 'wrong_size', 'wrong_product'] as const;
 
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
+type CardPlacement = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 type MarkerState = 'A' | 'a' | 'A!' | '·' | '○' | '?' | '×' | '👁' | '!' | '≡';
 type SearchResult = { asin: string; title: string; brand: string; comment: string; workflow_status: string };
+type CardControlsSettings = { placement: CardPlacement; offsetX: number; offsetY: number; preferAboveOverlays: boolean };
 
 type OverlayEntry = {
   sku: string; wbUrl: string; linkElement: HTMLAnchorElement; cardElement: HTMLElement; overlayElement: HTMLDivElement;
   statusElement: HTMLSpanElement; buttonElement: HTMLButtonElement; menuButtonElement: HTMLButtonElement; selectElement: HTMLInputElement; hoverTimer: number | null;
+  lastCardState: string;
 };
 
 declare global { interface Window { __wbAsinContentBooted?: boolean; } }
@@ -20,6 +23,7 @@ declare global { interface Window { __wbAsinContentBooted?: boolean; } }
 class OverlayManager {
   private readonly root: HTMLDivElement;
   private readonly shadow: ShadowRoot;
+  private readonly cardControlsRoot: HTMLDivElement;
   private readonly layer: HTMLDivElement;
   private readonly dropdownLayer: HTMLDivElement;
   private readonly modalLayer: HTMLDivElement;
@@ -41,10 +45,13 @@ class OverlayManager {
   private restoreFocusEl: HTMLElement | null = null;
   private updateQueued = false;
   private overlayPosition: OverlayPosition = 'top-left';
+  private cardControlsSettings: CardControlsSettings = { placement: 'top-left', offsetX: 8, offsetY: 8, preferAboveOverlays: true };
+  private occlusionLogged = 0;
   private readonly cardSelectors = 'article, li, [data-nm-id], [class*="card"], [class*="product"], [class*="goods"]';
 
   constructor() {
     this.root = this.ensureRoot();
+    this.cardControlsRoot = this.ensureCardControlsRoot();
     this.shadow = this.root.shadowRoot ?? this.root.attachShadow({ mode: 'open' });
     this.layer = document.createElement('div'); this.layer.className = 'overlay-layer';
     this.dropdownLayer = document.createElement('div'); this.dropdownLayer.className = 'dropdown-layer';
@@ -63,6 +70,7 @@ class OverlayManager {
 
   async init(): Promise<void> {
     await this.refreshOverlayPositionSetting();
+    await this.refreshCardControlsSettings();
     await this.refreshPanelContext();
     this.panelButton.addEventListener('click', () => {
       const open = this.panel.classList.toggle('open');
@@ -73,7 +81,9 @@ class OverlayManager {
     this.linkTypeSelect.addEventListener('change', () => { void sendMessage({ type: 'setDefaultLinkType', linkType: this.linkTypeSelect.value }); });
     document.addEventListener('click', () => this.closeMenu());
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeTopLayer(); });
+    window.addEventListener('scroll', () => this.closeMenu(), { passive: true });
     setInterval(() => { void this.refreshPanelContext(); }, 3500);
+    void logContent('card_controls_strategy', { strategy: 'document_absolute' });
   }
 
   private closeTopLayer(): void {
@@ -84,8 +94,20 @@ class OverlayManager {
   upsertFromAnchor(anchor: HTMLAnchorElement, sku: string, wbUrl: string): void {
     const card = this.findCardContainer(anchor);
     const existing = this.overlays.get(sku);
-    if (existing) { existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl; return; }
-    const overlay = document.createElement('div'); overlay.className = 'wb-amz-overlay'; overlay.dataset.wbSku = sku;
+    if (existing) {
+      existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl;
+      if (!this.cardControlsRoot.contains(existing.overlayElement)) this.cardControlsRoot.appendChild(existing.overlayElement);
+      this.applyCardControlPosition(existing, 'card_updated');
+      void logContent('card_controls_updated', { sku });
+      return;
+    }
+    const duplicates = this.cardControlsRoot.querySelectorAll<HTMLDivElement>(`.wb-asin-card-controls[data-wb-sku="${sku}"]`);
+    const normalize = normalizeCardControlsCount(duplicates.length);
+    const duplicate = duplicates[0] ?? null;
+    if (normalize.shouldTrimDuplicates) {
+      for (let i = 1; i < duplicates.length; i += 1) duplicates[i].remove();
+    }
+    const overlay = duplicate ?? document.createElement('div'); overlay.className = 'wb-amz-overlay wb-asin-card-controls'; overlay.dataset.wbSku = sku;
     const status = document.createElement('span'); status.className = 'wb-amz-status'; status.textContent = '·';
     status.addEventListener('click', (event) => {
       event.preventDefault();
@@ -98,19 +120,21 @@ class OverlayManager {
     menuBtn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.openMenu(sku, menuBtn); });
     const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'wb-amz-select';
     select.addEventListener('change', async () => { await this.handleActionTouch(sku, 'select'); this.toggleSelection(sku, select.checked); });
-    overlay.append(select, status, btn, menuBtn);
-    this.layer.appendChild(overlay);
+    if (!duplicate) overlay.append(select, status, btn, menuBtn);
+    this.cardControlsRoot.appendChild(overlay);
 
-    const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null };
+    const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null, lastCardState: '' };
     card.addEventListener('mouseenter', () => {
       if (entry.hoverTimer !== null) return;
       entry.hoverTimer = window.setTimeout(() => { entry.hoverTimer = null; void sendMessage({ type: 'markSeenByHover', wb_sku: sku, wb_url: entry.wbUrl }).then(() => this.refreshCardState(sku, status)).catch(() => {}); }, 1200);
     });
     card.addEventListener('mouseleave', () => { if (entry.hoverTimer !== null) { clearTimeout(entry.hoverTimer); entry.hoverTimer = null; } });
     this.overlays.set(sku, entry);
+    this.applyCardControlPosition(entry, 'initial_attach');
     if (this.selectedSkus.has(sku)) select.checked = true;
     void this.refreshCardState(sku, status);
     void this.updatePageStats();
+    void logContent('card_controls_attached', { sku });
   }
 
   private toggleSelection(sku: string, selected: boolean): void {
@@ -144,7 +168,8 @@ class OverlayManager {
     this.closeModal(); this.closeMenu();
     const menu = await this.buildMenu(sku);
     const rect = trigger.getBoundingClientRect();
-    menu.style.left = `${Math.max(8, rect.left)}px`; menu.style.top = `${rect.bottom + 4}px`;
+    const pos = computeFloatingMenuPosition({ left: rect.left, bottom: rect.bottom, viewportWidth: window.innerWidth });
+    menu.style.left = `${pos.left}px`; menu.style.top = `${pos.top}px`;
     this.dropdownLayer.appendChild(menu); this.activeMenu = menu;
     void logContent('ui_menu_opened', { sku });
   }
@@ -181,9 +206,69 @@ class OverlayManager {
 
   getOverlayCount(): number { return this.overlays.size; }
 
-  async setOverlayPosition(position: OverlayPosition): Promise<void> { if (this.overlayPosition === position) return; this.overlayPosition = position; await logContent('overlay_position_setting_changed', { position }); this.schedulePositionUpdate('position_setting_changed'); }
-  async refreshOverlayPositionSetting(): Promise<void> { try { const response = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' }); if (response.position) this.overlayPosition = response.position; } catch { this.overlayPosition = 'top-left'; } }
+  async setOverlayPosition(position: OverlayPosition): Promise<void> {
+    if (this.overlayPosition === position) return;
+    this.overlayPosition = position;
+    if (position !== 'auto') this.cardControlsSettings.placement = position;
+    await logContent('overlay_position_setting_changed', { position });
+    this.schedulePositionUpdate('position_setting_changed');
+  }
+  async refreshOverlayPositionSetting(): Promise<void> {
+    try {
+      const response = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' });
+      if (response.position) {
+        this.overlayPosition = response.position;
+        if (response.position !== 'auto') this.cardControlsSettings.placement = response.position;
+      }
+    } catch { this.overlayPosition = 'top-left'; }
+  }
+  async refreshCardControlsSettings(): Promise<void> {
+    try {
+      const response = await sendMessage<{ ok: boolean; settings: CardControlsSettings }>({ type: 'getCardControlsSettings' });
+      if (response.settings) this.cardControlsSettings = response.settings;
+    } catch {}
+  }
+  async setCardControlsSettings(settings: CardControlsSettings): Promise<void> {
+    this.cardControlsSettings = settings;
+    await logContent('card_controls_position_setting_changed', settings);
+    for (const entry of this.overlays.values()) {
+      this.applyCardControlPosition(entry, 'settings_changed');
+    }
+  }
   schedulePositionUpdate(reason: string): void { if (this.updateQueued) return; this.updateQueued = true; requestAnimationFrame(() => { this.updateQueued = false; this.updatePositions(reason); }); }
+  private applyCardControlPosition(entry: OverlayEntry, reason: string): void {
+    const cardRect = entry.cardElement.getBoundingClientRect();
+    if (cardRect.width <= 0 || cardRect.height <= 0) return;
+    const docOrigin = toDocumentCoordinates({ top: cardRect.top, left: cardRect.left }, window.scrollX, window.scrollY);
+    const controlsRect = entry.overlayElement.getBoundingClientRect();
+    const placement = computeAbsoluteControlPlacement(
+      this.cardControlsSettings.placement,
+      { width: cardRect.width, height: cardRect.height },
+      docOrigin,
+      { width: controlsRect.width || 96, height: controlsRect.height || 28 },
+      { x: this.cardControlsSettings.offsetX, y: this.cardControlsSettings.offsetY }
+    );
+    entry.overlayElement.style.left = `${Math.max(0, Math.round(placement.left))}px`;
+    entry.overlayElement.style.top = `${Math.max(0, Math.round(placement.top))}px`;
+    entry.overlayElement.classList.toggle('wb-asin-prefer-above', this.cardControlsSettings.preferAboveOverlays);
+    requestAnimationFrame(() => {
+      const nextRect = entry.overlayElement.getBoundingClientRect();
+      if (!nextRect.width || !nextRect.height) return;
+      const precise = computeAbsoluteControlPlacement(
+        this.cardControlsSettings.placement,
+        { width: cardRect.width, height: cardRect.height },
+        docOrigin,
+        { width: nextRect.width, height: nextRect.height },
+        { x: this.cardControlsSettings.offsetX, y: this.cardControlsSettings.offsetY }
+      );
+      entry.overlayElement.style.left = `${Math.max(0, Math.round(precise.left))}px`;
+      entry.overlayElement.style.top = `${Math.max(0, Math.round(precise.top))}px`;
+      if (reason === 'initial_attach' || reason === 'settings_changed' || reason === 'position_setting_changed') {
+        void logContent('card_controls_positioned', { sku: entry.sku, reason, top: Math.round(precise.top), left: Math.round(precise.left) });
+      }
+      this.logOcclusionIfNeeded(entry, nextRect, reason);
+    });
+  }
 
   private showToast(message: string, undoType?: 'link_created' | 'rejected_set' | 'deferred_set' | 'group_added' | 'group_removed'): void {
     const toast = document.createElement('div'); toast.className = 'wb-amz-toast';
@@ -531,6 +616,8 @@ class OverlayManager {
         ctx.context.seen_status ? `Seen: ${ctx.context.seen_status}` : ''
       ].filter(Boolean);
       statusEl.title = titleParts.join('\n');
+      const entry = this.overlays.get(sku);
+      if (entry) this.applyCardControlPosition(entry, 'state_refresh');
       await this.updatePageStats();
     } catch { statusEl.textContent = '○'; }
   }
@@ -571,21 +658,37 @@ class OverlayManager {
   }
 
   private updatePositions(reason: string): void {
-    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    if (document.body.lastElementChild !== this.cardControlsRoot) document.body.appendChild(this.cardControlsRoot);
     for (const [sku, entry] of this.overlays.entries()) {
-      if (!entry.cardElement.isConnected || !entry.linkElement.isConnected) { entry.overlayElement.remove(); this.overlays.delete(sku); continue; }
-      const cardRect = entry.cardElement.getBoundingClientRect();
-      if (cardRect.width <= 0 || cardRect.height <= 0 || cardRect.bottom < 0 || cardRect.top > viewport.height) { entry.overlayElement.style.display = 'none'; continue; }
-      const placement = this.resolvePlacement(entry.cardElement, cardRect, viewport);
-      const overlayRect = entry.overlayElement.getBoundingClientRect();
-      const width = overlayRect.width || 90; const height = overlayRect.height || 28; const margin = 8;
-      let left = cardRect.left + margin; let top = cardRect.top + margin;
-      if (placement.includes('right')) left = cardRect.right - width - margin;
-      if (placement.includes('bottom')) top = cardRect.bottom - height - margin;
-      left = Math.max(0, Math.min(viewport.width - width, left)); top = Math.max(0, Math.min(viewport.height - height, top));
-      entry.overlayElement.style.display = 'inline-flex'; entry.overlayElement.style.left = `${Math.round(left)}px`; entry.overlayElement.style.top = `${Math.round(top)}px`;
+      if (!entry.cardElement.isConnected || !entry.linkElement.isConnected) {
+        entry.overlayElement.remove();
+        this.overlays.delete(sku);
+        void logContent('card_controls_removed', { sku, reason });
+      } else if (reason === 'mutation' || reason === 'initial' || reason === 'interval' || reason === 'resize' || reason === 'position_setting_changed' || reason === 'popup_force_scan' || reason === 'scroll_end') {
+        this.applyCardControlPosition(entry, reason);
+      }
     }
-    void logContent('overlay_position_updated', { reason, visible_count: this.overlays.size });
+  }
+  private logOcclusionIfNeeded(entry: OverlayEntry, rect: DOMRect, reason: string): void {
+    if (this.occlusionLogged >= 5) return;
+    const x = Math.floor(rect.left + rect.width / 2);
+    const y = Math.floor(rect.top + rect.height / 2);
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return;
+    const stack = document.elementsFromPoint(x, y);
+    const top = stack[0] as HTMLElement | undefined;
+    if (!top || entry.overlayElement.contains(top) || top === entry.overlayElement) return;
+    this.occlusionLogged += 1;
+    void logContent('card_controls_occluded', { sku: entry.sku, reason, top_tag: top.tagName, top_class: top.className?.toString?.().slice(0, 120) || '' });
+  }
+  private ensureCardControlsRoot(): HTMLDivElement {
+    const existing = document.getElementById('wb-asin-card-controls-root') as HTMLDivElement | null;
+    if (existing) return existing;
+    const root = document.createElement('div');
+    root.id = 'wb-asin-card-controls-root';
+    root.setAttribute('style', cardControlsRootStyle());
+    document.body.appendChild(root);
+    void logContent('card_controls_absolute_root_created', {});
+    return root;
   }
   private resolvePlacement(card: HTMLElement, rect: DOMRect, viewport: { width: number; height: number }): Exclude<OverlayPosition, 'auto'> {
     if (this.overlayPosition !== 'auto') return this.overlayPosition;
@@ -601,7 +704,8 @@ class OverlayManager {
   private mountShadow(): void {
     if (this.shadow.querySelector('style')) return;
     const style = document.createElement('style');
-    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-overlay{position:fixed;display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.96);border:1px solid #7a38ff;border-radius:10px;padding:3px 6px;box-shadow:0 2px 6px rgba(30,20,60,.2);pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-overlay.selected{outline:2px solid #18a058}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:10px;padding:6px 10px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:340px;max-height:75vh;overflow:auto;background:#fff;border:1px solid #ccbaff;border-radius:10px;padding:10px;display:none;pointer-events:auto;font:12px Arial,sans-serif}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0 0 8px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
+    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:10px;padding:6px 10px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:340px;max-height:75vh;overflow:auto;background:#fff;border:1px solid #ccbaff;border-radius:10px;padding:10px;display:none;pointer-events:auto;font:12px Arial,sans-serif}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0 0 8px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
+    this.ensureCardDomStyle();
     const header = document.createElement('h3'); header.textContent = 'WB ↔ Amazon';
     const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => this.panel.classList.remove('open'));
     const headerRow = document.createElement('div'); headerRow.className = 'row'; headerRow.append(header, close);
@@ -619,21 +723,36 @@ class OverlayManager {
     this.panel.append(headerRow, asinRow, this.activeAsinEl, setRow, this.statsEl, this.selectedInfoEl, this.bulkActionsEl);
     this.shadow.append(style, this.layer, this.dropdownLayer, this.modalLayer, this.toastLayer, this.panelButton, this.panel);
   }
+  private ensureCardDomStyle(): void {
+    if (document.getElementById('wb-asin-card-controls-style')) return;
+    const style = document.createElement('style');
+    style.id = 'wb-asin-card-controls-style';
+    style.textContent = `#wb-asin-card-controls-root{${cardControlsRootStyle()}}.wb-asin-card-controls{position:absolute !important;display:inline-flex !important;align-items:center !important;gap:4px !important;background:rgba(255,255,255,.97) !important;border:1px solid #7a38ff !important;border-radius:10px !important;padding:3px 6px !important;box-shadow:0 3px 10px rgba(30,20,60,.28) !important;pointer-events:none !important;z-index:2147483647 !important;font-family:Arial,sans-serif !important;box-sizing:border-box !important}.wb-asin-card-controls.wb-asin-prefer-above{box-shadow:0 4px 12px rgba(30,20,60,.36) !important;border-color:#5f20d4 !important;background:#fff !important}.wb-asin-card-controls button,.wb-asin-card-controls input,.wb-asin-card-controls [role="button"]{all:initial;pointer-events:auto !important;box-sizing:border-box !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls .wb-amz-btn,.wb-asin-card-controls .wb-amz-menu-btn{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-asin-card-controls .wb-amz-menu-btn{padding:4px 6px}.wb-asin-card-controls .wb-amz-status{all:initial;color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center;cursor:pointer;pointer-events:auto !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls.selected{outline:2px solid #18a058}.wb-asin-card-controls .wb-amz-select{margin:0}`;
+    document.head.appendChild(style);
+    void logContent('card_controls_zindex_applied', { z_index: 2147483647 });
+  }
 }
 
 if (!window[CONTENT_BOOT_FLAG]) { window[CONTENT_BOOT_FLAG] = true; void startContentScript(); }
 
 async function startContentScript(): Promise<void> {
   const manager = new OverlayManager(); await manager.init(); await logContent('content_script_loaded', { url: location.href, ready_state: document.readyState });
-  chrome.runtime.onMessage.addListener((message: { type?: string; position?: OverlayPosition }, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message: { type?: string; position?: OverlayPosition; settings?: CardControlsSettings }, _sender, sendResponse) => {
     if (message.type === 'pingContentScript') { sendResponse({ ok: true }); return true; }
     if (message.type === 'forceScan') { const stats = scan(manager, 'popup_force_scan'); sendResponse({ ok: true, foundLinks: stats.linksFound, extractedSkus: stats.skuExtracted, injectedOverlays: stats.overlaysInjected }); return true; }
     if (message.type === 'overlayPositionSettingChanged' && message.position) { void manager.setOverlayPosition(message.position); sendResponse({ ok: true }); return true; }
+    if (message.type === 'cardControlsSettingsChanged' && message.settings) { void manager.setCardControlsSettings(message.settings); sendResponse({ ok: true }); return true; }
     return false;
   });
   let pendingReason = 'initial'; let scanTimer: number | null = null;
   const scheduleScan = (reason: string): void => { pendingReason = reason === 'popup_force_scan' ? reason : pendingReason === 'popup_force_scan' ? pendingReason : reason; if (scanTimer !== null) return; scanTimer = window.setTimeout(() => { scan(manager, pendingReason); pendingReason = 'idle'; scanTimer = null; }, reason === 'popup_force_scan' ? 0 : 350); };
-  const observer = new MutationObserver(() => scheduleScan('mutation')); observer.observe(document.documentElement, { childList: true, subtree: true }); window.addEventListener('scroll', () => scheduleScan('scroll'), { passive: true }); window.addEventListener('resize', () => manager.schedulePositionUpdate('resize')); setInterval(() => scheduleScan('interval'), 8000); scheduleScan('initial');
+  const observer = new MutationObserver(() => scheduleScan('mutation')); observer.observe(document.documentElement, { childList: true, subtree: true });
+  let scrollEndTimer: number | null = null;
+  window.addEventListener('scroll', () => {
+    if (scrollEndTimer !== null) window.clearTimeout(scrollEndTimer);
+    scrollEndTimer = window.setTimeout(() => scheduleScan('scroll_end'), 200);
+  }, { passive: true });
+  window.addEventListener('resize', () => scheduleScan('resize')); setInterval(() => scheduleScan('interval'), 8000); scheduleScan('initial');
 }
 
 type ScanStats = { linksFound: number; skuExtracted: number; overlaysInjected: number; sampleSkus: string[] };

@@ -126,23 +126,37 @@ npm run test
 5. Open extension **Popup**.
 6. Search and click one ASIN to set active ASIN.
 7. Open `https://www.wildberries.ru/catalog/0/search.aspx?...` (any listing page).
-8. Scroll so product cards are visible.
-9. Verify compact overlay appears on cards with status marker, `A+`, and `⋯` menu.
-10. Hover one card for at least 1.2 seconds and verify seen marker appears (`👁`).
-11. Open `⋯` menu and click **Copy WB URL**. Verify toast `WB link copied` appears.
-12. Open `⋯` menu and click **Reject**. Pick reason and verify marker changes to `×`.
-13. Click **Undo** on the toast and verify reject is reverted.
-14. Open `⋯` menu and click **Defer / check later**. Pick reason and verify marker changes to `?`.
-15. Click `A+` on one card and verify status changes to `A`.
-16. Open Options and click export button.
-17. Verify downloads exist:
+8. Confirm `A+` / `⋯` / checkbox controls appear directly on cards.
+9. Scroll slowly and quickly.
+10. Confirm card controls move naturally with cards (no lag/snap).
+11. Click `A+` after scrolling and verify status changes to `A`.
+12. Open `⋯` menu after scrolling and click **Copy WB URL**. Verify toast `WB link copied` appears.
+13. Select multiple cards via checkbox and run one bulk action from floating panel.
+14. Confirm floating WB ↔ Amazon panel remains fixed while page scrolls.
+15. Hover one card for at least 1.2 seconds and verify seen marker appears (`👁`).
+16. Open `⋯` menu and click **Reject**. Pick reason and verify marker changes to `×`.
+17. Click **Undo** on the toast and verify reject is reverted.
+18. Open `⋯` menu and click **Defer / check later**. Pick reason and verify marker changes to `?`.
+19. Open Options and click export button.
+20. Verify downloads exist:
     - `wb_products.csv`
     - `asin_links.csv`
     - `events.csv`
     - `meta.json`
     - `debug_log.json`
-18. Open `wb_products.csv` and confirm rejected/deferred/seen_status fields are updated.
-19. Open `events.csv` and confirm events include hover/copy/reject/defer/undo actions.
+21. Open `wb_products.csv` and confirm rejected/deferred/seen_status fields are updated.
+22. Open `events.csv` and confirm events include hover/copy/reject/defer/undo actions.
+23. Download diagnostic snapshot from Options and confirm file is produced.
+
+## Manual test: MPStats/WB overlay collision handling
+
+1. Open Wildberries with MPStats extension enabled.
+2. Confirm WB-ASIN controls are visible above MPStats/WB overlays/banners.
+3. Scroll slowly and quickly; confirm controls move naturally and do not lag/snap.
+4. Click `A+` on a card where MPStats overlay is present.
+5. Open `⋯` menu on that card and execute one action.
+6. Select checkboxes on several cards and run one bulk action from floating panel.
+7. Change placement setting in popup and confirm control location updates.
 
 ## Manual backup/restore test (CSV State v2)
 

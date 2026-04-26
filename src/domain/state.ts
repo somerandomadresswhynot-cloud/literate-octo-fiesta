@@ -381,6 +381,10 @@ function defaultMeta(): MetaRecord {
     active_asin: '',
     default_link_type: 'candidate',
     overlay_position: 'top-left',
+    card_controls_position: 'top-left',
+    card_controls_offset_x: '8',
+    card_controls_offset_y: '8',
+    card_controls_prefer_above_overlays: 'true',
     last_imported_at: '',
     last_exported_at: '',
     verbose_scan_logging: 'false'
