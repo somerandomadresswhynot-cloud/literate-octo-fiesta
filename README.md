@@ -171,3 +171,16 @@ npm run test
 - SKU detection is strictly URL-based from visible Wildberries product links.
 - The prototype does not parse WB title, price, brand, or image.
 - Overlay is absolutely positioned to avoid grid layout shifts.
+
+
+## Manual test: ASIN Search + Link Types + Conflict Handling v1
+
+1. Select active ASIN `B000TEST01` in popup.
+2. Link one WB SKU with `A+`.
+3. Switch active ASIN to `B000TEST02`.
+4. Click `A+` on the same SKU.
+5. Confirm conflict prompt appears.
+6. Choose add second link.
+7. Export and verify two active links for the SKU.
+8. Try another SKU and choose replace existing link.
+9. Export and verify previous link is inactive (`is_active=false`, `deleted_at` filled).

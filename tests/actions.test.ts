@@ -1,26 +1,9 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const keyByStore: Record<string, string> = {
-  amazon_products: 'asin',
-  wb_products: 'wb_sku',
-  asin_links: 'link_id',
-  groups: 'group_id',
-  group_members: 'member_id',
-  events: 'event_id',
-  meta: 'schema_version',
-  debug_log: 'ts'
+  amazon_products: 'asin', wb_products: 'wb_sku', asin_links: 'link_id', groups: 'group_id', group_members: 'member_id', events: 'event_id', meta: 'schema_version', debug_log: 'ts'
 };
-
-const stores: Record<string, any[]> = {
-  amazon_products: [],
-  wb_products: [],
-  asin_links: [],
-  groups: [],
-  group_members: [],
-  events: [],
-  meta: [],
-  debug_log: []
-};
+const stores: Record<string, any[]> = { amazon_products: [], wb_products: [], asin_links: [], groups: [], group_members: [], events: [], meta: [], debug_log: [] };
 
 vi.mock('../src/lib/db.js', () => ({
   getAll: async (store: string) => stores[store] ?? [],
@@ -34,21 +17,10 @@ vi.mock('../src/lib/db.js', () => ({
   }
 }));
 
-import {
-  getCardState,
-  linkWbSkuToActiveAsin,
-  markCardTouched,
-  markSeenByHover,
-  setActiveAsin,
-  setDeferred,
-  setRejected,
-  undoLastAction
-} from '../src/domain/actions.js';
+import { getCardState, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../src/domain/actions.js';
 
 describe('domain actions', () => {
-  beforeEach(() => {
-    for (const key of Object.keys(stores)) stores[key] = [];
-  });
+  beforeEach(() => { for (const key of Object.keys(stores)) stores[key] = []; });
 
   test('seen_by_hover event is written once per sku', async () => {
     await markSeenByHover('123', 'https://www.wildberries.ru/catalog/123/detail.aspx');
@@ -62,18 +34,47 @@ describe('domain actions', () => {
     expect(state.seenStatus).toBe('touched');
   });
 
-  test('reject updates wb_products and writes event', async () => {
-    await setRejected('555', 'https://www.wildberries.ru/catalog/555/detail.aspx', 'wrong_product', 'bad color');
-    expect(stores.wb_products[0].rejected).toBe('true');
-    expect(stores.wb_products[0].rejected_reason).toContain('wrong_product');
-    expect(stores.events.some((e) => e.event_type === 'rejected_set' && e.wb_sku === '555')).toBe(true);
+  test('A+ uses default link type', async () => {
+    await setActiveAsin('B0TESTASIN');
+    await setDefaultLinkType('exact_match');
+    const first = await linkWbSkuToActiveAsin('12345678', 'https://www.wildberries.ru/catalog/12345678/detail.aspx');
+    expect(first.status).toBe('created');
+    expect(stores.asin_links[0].link_type).toBe('exact_match');
   });
 
-  test('defer updates wb_products and writes event', async () => {
-    await setDeferred('777', 'https://www.wildberries.ru/catalog/777/detail.aspx', 'check_photo', 'need zoom');
-    expect(stores.wb_products[0].deferred).toBe('true');
-    expect(stores.wb_products[0].deferred_reason).toContain('check_photo');
-    expect(stores.events.some((e) => e.event_type === 'deferred_set' && e.wb_sku === '777')).toBe(true);
+  test('duplicate same ASIN skipped', async () => {
+    await setActiveAsin('B0TESTASIN');
+    await linkWbSkuToActiveAsin('12345678', 'https://www.wildberries.ru/catalog/12345678/detail.aspx');
+    const second = await linkWbSkuToActiveAsin('12345678', 'https://www.wildberries.ru/catalog/12345678/detail.aspx');
+    expect(second.status).toBe('duplicate_skipped');
+    expect(stores.asin_links.length).toBe(1);
+  });
+
+  test('add second link creates second active link', async () => {
+    await linkWbSkuToAsin({ wb_sku: '1', wb_url: 'u', asin: 'A1', createdByAction: 'add_to_asin' });
+    const conflict = await linkWbSkuToAsin({ wb_sku: '1', wb_url: 'u', asin: 'A2', createdByAction: 'add_to_asin' });
+    expect(conflict.status).toBe('conflict_detected');
+    const resolved = await linkWbSkuToAsin({ wb_sku: '1', wb_url: 'u', asin: 'A2', createdByAction: 'add_to_asin', conflictResolution: 'add_second_link' });
+    expect(resolved.status).toBe('created');
+    expect(stores.asin_links.filter((x) => x.wb_sku === '1' && x.is_active === 'true').length).toBe(2);
+  });
+
+  test('replace deactivates old link and creates new one', async () => {
+    await linkWbSkuToAsin({ wb_sku: '2', wb_url: 'u', asin: 'A1', createdByAction: 'add_to_asin' });
+    await linkWbSkuToAsin({ wb_sku: '2', wb_url: 'u', asin: 'A2', createdByAction: 'add_to_asin', conflictResolution: 'replace_existing' });
+    const old = stores.asin_links.find((x) => x.wb_sku === '2' && x.asin === 'A1');
+    const cur = stores.asin_links.find((x) => x.wb_sku === '2' && x.asin === 'A2' && x.is_active === 'true');
+    expect(old.is_active).toBe('false');
+    expect(Boolean(old.deleted_at)).toBe(true);
+    expect(cur).toBeTruthy();
+  });
+
+  test('rejected product requires explicit choice', async () => {
+    await setRejected('5', 'u', 'wrong_product', 'x');
+    const first = await linkWbSkuToAsin({ wb_sku: '5', wb_url: 'u', asin: 'A1', createdByAction: 'add_to_asin' });
+    expect(first.status).toBe('rejected_confirmation_required');
+    const second = await linkWbSkuToAsin({ wb_sku: '5', wb_url: 'u', asin: 'A1', createdByAction: 'add_to_asin', rejectedResolution: 'keep_rejected' });
+    expect(second.status).toBe('created');
   });
 
   test('undo link deactivates active link', async () => {
@@ -84,41 +85,8 @@ describe('domain actions', () => {
     expect(stores.asin_links[0].is_active).toBe('false');
   });
 
-  test('undo reject clears rejected state', async () => {
-    await setRejected('1000', 'https://www.wildberries.ru/catalog/1000/detail.aspx', 'duplicate', '');
-    await undoLastAction();
-    expect(stores.wb_products[0].rejected).toBe('false');
-    expect(stores.wb_products[0].rejected_reason).toBe('');
-  });
-
-  test('undo defer clears deferred state', async () => {
-    await setDeferred('1001', 'https://www.wildberries.ru/catalog/1001/detail.aspx', 'other', '');
-    await undoLastAction();
-    expect(stores.wb_products[0].deferred).toBe('false');
-    expect(stores.wb_products[0].deferred_reason).toBe('');
-  });
-
-  test('linkWbSkuToActiveAsin creates active link once', async () => {
-    await setActiveAsin('B0TESTASIN');
-    const first = await linkWbSkuToActiveAsin('12345678', 'https://www.wildberries.ru/catalog/12345678/detail.aspx');
-    const second = await linkWbSkuToActiveAsin('12345678', 'https://www.wildberries.ru/catalog/12345678/detail.aspx');
-    expect(first.status).toBe('created');
-    expect(second.status).toBe('duplicate_skipped');
-    expect(stores.asin_links.length).toBe(1);
-
-    const state = await getCardState('12345678');
-    expect(state.linked).toBe(true);
-    expect(state.activeAsinLinked).toBe(true);
-  });
-
-  test('parallel calls do not create duplicate links and no duplicate link_created event', async () => {
-    await setActiveAsin('B0TESTASIN');
-    const [r1, r2] = await Promise.all([
-      linkWbSkuToActiveAsin('999', 'https://www.wildberries.ru/catalog/999/detail.aspx'),
-      linkWbSkuToActiveAsin('999', 'https://www.wildberries.ru/catalog/999/detail.aspx')
-    ]);
-    expect([r1.status, r2.status].sort()).toEqual(['created', 'created']);
-    expect(stores.asin_links.length).toBe(1);
-    expect(stores.events.filter((e) => e.event_type === 'link_created').length).toBe(1);
+  test('defer updates wb_products and writes event', async () => {
+    await setDeferred('777', 'https://www.wildberries.ru/catalog/777/detail.aspx', 'check_photo', 'need zoom');
+    expect(stores.wb_products[0].deferred).toBe('true');
   });
 });

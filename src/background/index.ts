@@ -1,6 +1,6 @@
 import { parseCsv } from '../lib/csv.js';
 import { clearStore, getAll, putMany } from '../lib/db.js';
-import { getCardContext, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, markCardTouched, markSeenByHover, recordLinkCopied, setActiveAsin, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
+import { LINK_TYPES, getCardContext, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, recordLinkCopied, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
 import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, validateLocalState } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 import { shouldPersistDebug } from '../lib/logging.js';
@@ -10,8 +10,10 @@ type Request =
   | { type: 'importStateFiles'; files: Record<string, string>; mode?: 'import' | 'restore' }
   | { type: 'searchAsin'; query: string }
   | { type: 'setActiveAsin'; asin: string }
+  | { type: 'setDefaultLinkType'; linkType: string }
   | { type: 'getPopupState' }
   | { type: 'linkSku'; wb_sku: string; wb_url: string }
+  | { type: 'linkSkuToAsin'; wb_sku: string; wb_url: string; asin: string; linkType?: string; conflictResolution?: 'add_second_link' | 'replace_existing'; rejectedResolution?: 'keep_rejected' | 'clear_rejected' }
   | { type: 'getCardState'; wb_sku: string }
   | { type: 'markSeenByHover'; wb_sku: string; wb_url: string }
   | { type: 'markCardTouched'; wb_sku: string; wb_url: string; source: string }
@@ -31,6 +33,30 @@ type Request =
   | { type: 'getOverlayPosition' }
   | { type: 'setOverlayPosition'; position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto' }
   | { type: 'logDebug'; level?: 'info' | 'error'; action: string; details?: Record<string, unknown> };
+
+
+export async function performAsinSearch(query: string): Promise<{ results: AmazonProduct[]; activeAsin: string; linkTypes: readonly string[] }> {
+  const [products, meta, events] = await Promise.all([
+    getAll<AmazonProduct>('amazon_products'),
+    getMeta(),
+    getAll('events')
+  ]);
+  const q = query.toLowerCase().trim();
+  const matches = products.filter((product) => {
+    if (!q) return true;
+    return [product.asin, product.title, product.brand, product.category, product.keywords, product.comment, product.workflow_status].some((field) => field?.toLowerCase().includes(q));
+  });
+  const recentAsins = (events as Array<{ event_type: string; asin: string }>).filter((x) => x.event_type === 'active_asin_changed' && x.asin).map((x) => x.asin);
+  const recentOrder = Array.from(new Set(recentAsins.reverse()));
+  const rank = (asin: string, workflowStatus: string): number => {
+    if (!q && meta.active_asin && asin === meta.active_asin) return 0;
+    const recentIdx = recentOrder.indexOf(asin);
+    if (!q && recentIdx >= 0) return 1 + recentIdx;
+    if (!q && workflowStatus === 'in_progress') return 100;
+    return 1000;
+  };
+  return { results: matches.sort((a, b) => rank(a.asin, a.workflow_status) - rank(b.asin, b.workflow_status)).slice(0, 50), activeAsin: meta.active_asin, linkTypes: LINK_TYPES };
+}
 
 chrome.runtime.onMessage.addListener((message: Request, _sender: unknown, sendResponse: (response: unknown) => void) => {
   void handleMessage(message)
@@ -52,13 +78,7 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
   }
 
   if (message.type === 'searchAsin') {
-    const products = await getAll<AmazonProduct>('amazon_products');
-    const q = message.query.toLowerCase().trim();
-    const results = products.filter((product) => {
-      if (!q) return true;
-      return [product.asin, product.title, product.brand, product.comment].some((field) => field?.toLowerCase().includes(q));
-    }).slice(0, 50);
-    return { results };
+    return await performAsinSearch(message.query);
   }
 
   if (message.type === 'setActiveAsin') {
@@ -66,14 +86,32 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
     return {};
   }
 
+  if (message.type === 'setDefaultLinkType') {
+    await setDefaultLinkType(message.linkType as any);
+    return {};
+  }
+
   if (message.type === 'getPopupState') {
     const products = await getAll<AmazonProduct>('amazon_products');
     const meta = await getMeta();
-    return { amazonCount: products.length, activeAsin: meta.active_asin };
+    return { amazonCount: products.length, activeAsin: meta.active_asin, defaultLinkType: meta.default_link_type || 'candidate', linkTypes: LINK_TYPES };
   }
 
   if (message.type === 'linkSku') {
     const result = await linkWbSkuToActiveAsin(message.wb_sku, message.wb_url);
+    return { result };
+  }
+
+  if (message.type === 'linkSkuToAsin') {
+    const result = await linkWbSkuToAsin({
+      wb_sku: message.wb_sku,
+      wb_url: message.wb_url,
+      asin: message.asin,
+      linkType: message.linkType as any,
+      createdByAction: 'add_to_asin',
+      conflictResolution: message.conflictResolution,
+      rejectedResolution: message.rejectedResolution
+    });
     return { result };
   }
 
