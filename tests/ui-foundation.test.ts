@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { filterAndRankAsinResults } from '../src/lib/asinSearch.js';
-import { buildReasonPayload, buildStatusTooltip, categorizeBulkConflict, computeCardControlsPositionStyle, computeFloatingMenuPosition, mapConflictResolution, normalizeCardControlsCount, shouldReparentCardControls } from '../src/content/ui-helpers.js';
+import { buildReasonPayload, buildStatusTooltip, cardControlsRootStyle, categorizeBulkConflict, computeAbsoluteControlPlacement, computeCardControlsPositionStyle, computeFloatingMenuPosition, mapConflictResolution, normalizeCardControlsCount, shouldReparentCardControls, toDocumentCoordinates } from '../src/content/ui-helpers.js';
 
 describe('ui foundation helpers', () => {
   test('asin ranking defaults keep active first', () => {
@@ -55,5 +55,27 @@ describe('ui foundation helpers', () => {
     expect(computeCardControlsPositionStyle('top-right', 8, 6)).toEqual({ left: 'auto', right: '8px', top: '6px', bottom: 'auto' });
     expect(computeCardControlsPositionStyle('bottom-left', 8, 6)).toEqual({ left: '8px', right: 'auto', top: 'auto', bottom: '6px' });
     expect(computeCardControlsPositionStyle('bottom-right', 8, 6)).toEqual({ left: 'auto', right: '8px', top: 'auto', bottom: '6px' });
+  });
+
+  test('document coordinates are derived from rect + scroll', () => {
+    expect(toDocumentCoordinates({ top: 20, left: 40 }, 10, 200)).toEqual({ top: 220, left: 50 });
+  });
+
+  test('absolute placement helper uses card size and control size', () => {
+    const input = { width: 200, height: 300 };
+    const origin = { top: 1000, left: 500 };
+    const controls = { width: 80, height: 24 };
+    const offsets = { x: 8, y: 6 };
+    expect(computeAbsoluteControlPlacement('top-left', input, origin, controls, offsets)).toEqual({ top: 1006, left: 508 });
+    expect(computeAbsoluteControlPlacement('top-right', input, origin, controls, offsets)).toEqual({ top: 1006, left: 612 });
+    expect(computeAbsoluteControlPlacement('bottom-left', input, origin, controls, offsets)).toEqual({ top: 1270, left: 508 });
+    expect(computeAbsoluteControlPlacement('bottom-right', input, origin, controls, offsets)).toEqual({ top: 1270, left: 612 });
+  });
+
+  test('absolute root style helper includes required non-layout styles', () => {
+    const css = cardControlsRootStyle();
+    expect(css).toContain('position:absolute');
+    expect(css).toContain('pointer-events:none');
+    expect(css).toContain('z-index:2147483647');
   });
 });

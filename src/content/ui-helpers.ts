@@ -49,6 +49,27 @@ export function shouldReparentCardControls(cardLastElementIsControls: boolean): 
   return !cardLastElementIsControls;
 }
 
+export function toDocumentCoordinates(rect: { top: number; left: number }, scrollX: number, scrollY: number): { top: number; left: number } {
+  return { top: rect.top + scrollY, left: rect.left + scrollX };
+}
+
+export function computeAbsoluteControlPlacement(
+  placement: CardControlsPlacement,
+  cardRect: { width: number; height: number },
+  docOrigin: { top: number; left: number },
+  controlsSize: { width: number; height: number },
+  offsets: { x: number; y: number }
+): { top: number; left: number } {
+  if (placement === 'top-right') return { top: docOrigin.top + offsets.y, left: docOrigin.left + cardRect.width - controlsSize.width - offsets.x };
+  if (placement === 'bottom-left') return { top: docOrigin.top + cardRect.height - controlsSize.height - offsets.y, left: docOrigin.left + offsets.x };
+  if (placement === 'bottom-right') return { top: docOrigin.top + cardRect.height - controlsSize.height - offsets.y, left: docOrigin.left + cardRect.width - controlsSize.width - offsets.x };
+  return { top: docOrigin.top + offsets.y, left: docOrigin.left + offsets.x };
+}
+
+export function cardControlsRootStyle(): string {
+  return 'position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;pointer-events:none !important;z-index:2147483647 !important;isolation:isolate !important;';
+}
+
 export function categorizeBulkConflict(items: Array<{ linksCount: number; linkedToTarget: boolean; linkedToOther: boolean; rejected: boolean; deferred: boolean }>): { noConflict: number; alreadyLinked: number; linkedOther: number; rejected: number; deferred: number; multipleLinks: number } {
   return items.reduce((acc, item) => {
     if (item.linksCount === 0) acc.noConflict += 1;

@@ -1,5 +1,5 @@
 import { sendMessage } from '../lib/runtime.js';
-import { buildReasonPayload, computeCardControlsPositionStyle, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS, shouldReparentCardControls } from './ui-helpers.js';
+import { buildReasonPayload, cardControlsRootStyle, computeAbsoluteControlPlacement, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS, toDocumentCoordinates } from './ui-helpers.js';
 
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
 const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
@@ -23,6 +23,7 @@ declare global { interface Window { __wbAsinContentBooted?: boolean; } }
 class OverlayManager {
   private readonly root: HTMLDivElement;
   private readonly shadow: ShadowRoot;
+  private readonly cardControlsRoot: HTMLDivElement;
   private readonly layer: HTMLDivElement;
   private readonly dropdownLayer: HTMLDivElement;
   private readonly modalLayer: HTMLDivElement;
@@ -45,10 +46,12 @@ class OverlayManager {
   private updateQueued = false;
   private overlayPosition: OverlayPosition = 'top-left';
   private cardControlsSettings: CardControlsSettings = { placement: 'top-left', offsetX: 8, offsetY: 8, preferAboveOverlays: true };
+  private occlusionLogged = 0;
   private readonly cardSelectors = 'article, li, [data-nm-id], [class*="card"], [class*="product"], [class*="goods"]';
 
   constructor() {
     this.root = this.ensureRoot();
+    this.cardControlsRoot = this.ensureCardControlsRoot();
     this.shadow = this.root.shadowRoot ?? this.root.attachShadow({ mode: 'open' });
     this.layer = document.createElement('div'); this.layer.className = 'overlay-layer';
     this.dropdownLayer = document.createElement('div'); this.dropdownLayer.className = 'dropdown-layer';
@@ -80,7 +83,7 @@ class OverlayManager {
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeTopLayer(); });
     window.addEventListener('scroll', () => this.closeMenu(), { passive: true });
     setInterval(() => { void this.refreshPanelContext(); }, 3500);
-    void logContent('card_controls_scroll_strategy', { strategy: 'attached' });
+    void logContent('card_controls_strategy', { strategy: 'document_absolute' });
   }
 
   private closeTopLayer(): void {
@@ -93,14 +96,12 @@ class OverlayManager {
     const existing = this.overlays.get(sku);
     if (existing) {
       existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl;
-      if (!card.contains(existing.overlayElement)) card.appendChild(existing.overlayElement);
-      this.ensureCardSupportsAttachedControls(card);
-      this.applyCardControlPosition(existing.overlayElement);
-      this.bringCardControlsToFront(card, existing.overlayElement, 'card_updated');
+      if (!this.cardControlsRoot.contains(existing.overlayElement)) this.cardControlsRoot.appendChild(existing.overlayElement);
+      this.applyCardControlPosition(existing, 'card_updated');
       void logContent('card_controls_updated', { sku });
       return;
     }
-    const duplicates = card.querySelectorAll<HTMLDivElement>(`.wb-asin-card-controls[data-wb-sku="${sku}"]`);
+    const duplicates = this.cardControlsRoot.querySelectorAll<HTMLDivElement>(`.wb-asin-card-controls[data-wb-sku="${sku}"]`);
     const normalize = normalizeCardControlsCount(duplicates.length);
     const duplicate = duplicates[0] ?? null;
     if (normalize.shouldTrimDuplicates) {
@@ -120,10 +121,7 @@ class OverlayManager {
     const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'wb-amz-select';
     select.addEventListener('change', async () => { await this.handleActionTouch(sku, 'select'); this.toggleSelection(sku, select.checked); });
     if (!duplicate) overlay.append(select, status, btn, menuBtn);
-    this.ensureCardSupportsAttachedControls(card);
-    this.applyCardControlPosition(overlay);
-    card.appendChild(overlay);
-    this.bringCardControlsToFront(card, overlay, 'initial_attach');
+    this.cardControlsRoot.appendChild(overlay);
 
     const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null, lastCardState: '' };
     card.addEventListener('mouseenter', () => {
@@ -132,6 +130,7 @@ class OverlayManager {
     });
     card.addEventListener('mouseleave', () => { if (entry.hoverTimer !== null) { clearTimeout(entry.hoverTimer); entry.hoverTimer = null; } });
     this.overlays.set(sku, entry);
+    this.applyCardControlPosition(entry, 'initial_attach');
     if (this.selectedSkus.has(sku)) select.checked = true;
     void this.refreshCardState(sku, status);
     void this.updatePageStats();
@@ -143,7 +142,6 @@ class OverlayManager {
     if (!entry) return;
     if (selected) this.selectedSkus.add(sku); else this.selectedSkus.delete(sku);
     entry.overlayElement.classList.toggle('selected', selected);
-    entry.cardElement.classList.toggle('wb-asin-card-selected', selected);
     this.selectedInfoEl.textContent = this.selectedSkus.size > 0 ? `Selected: ${this.selectedSkus.size}` : 'Bulk actions appear after selecting cards.';
     this.bulkActionsEl.style.display = this.selectedSkus.size > 0 ? 'flex' : 'none';
     void logContent('selection_changed', { selected_count: this.selectedSkus.size });
@@ -160,7 +158,7 @@ class OverlayManager {
       if (!this.selectedSkus.has(sku)) continue;
       this.selectedSkus.delete(sku);
       const entry = this.overlays.get(sku);
-      if (entry) { entry.selectElement.checked = false; entry.overlayElement.classList.remove('selected'); entry.cardElement.classList.remove('wb-asin-card-selected'); }
+      if (entry) { entry.selectElement.checked = false; entry.overlayElement.classList.remove('selected'); }
     }
     this.bulkActionsEl.style.display = 'none';
     this.selectedInfoEl.textContent = 'Bulk actions appear after selecting cards.';
@@ -168,8 +166,6 @@ class OverlayManager {
 
   private async openMenu(sku: string, trigger: HTMLButtonElement): Promise<void> {
     this.closeModal(); this.closeMenu();
-    const entry = this.overlays.get(sku);
-    if (entry) this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'before_menu_open');
     const menu = await this.buildMenu(sku);
     const rect = trigger.getBoundingClientRect();
     const pos = computeFloatingMenuPosition({ left: rect.left, bottom: rect.bottom, viewportWidth: window.innerWidth });
@@ -236,18 +232,42 @@ class OverlayManager {
     this.cardControlsSettings = settings;
     await logContent('card_controls_position_setting_changed', settings);
     for (const entry of this.overlays.values()) {
-      this.applyCardControlPosition(entry.overlayElement);
-      this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'settings_changed');
+      this.applyCardControlPosition(entry, 'settings_changed');
     }
   }
   schedulePositionUpdate(reason: string): void { if (this.updateQueued) return; this.updateQueued = true; requestAnimationFrame(() => { this.updateQueued = false; this.updatePositions(reason); }); }
-  private applyCardControlPosition(overlay: HTMLDivElement): void {
-    const pos = computeCardControlsPositionStyle(this.cardControlsSettings.placement, this.cardControlsSettings.offsetX, this.cardControlsSettings.offsetY);
-    overlay.style.left = pos.left;
-    overlay.style.right = pos.right;
-    overlay.style.top = pos.top;
-    overlay.style.bottom = pos.bottom;
-    overlay.classList.toggle('wb-asin-prefer-above', this.cardControlsSettings.preferAboveOverlays);
+  private applyCardControlPosition(entry: OverlayEntry, reason: string): void {
+    const cardRect = entry.cardElement.getBoundingClientRect();
+    if (cardRect.width <= 0 || cardRect.height <= 0) return;
+    const docOrigin = toDocumentCoordinates({ top: cardRect.top, left: cardRect.left }, window.scrollX, window.scrollY);
+    const controlsRect = entry.overlayElement.getBoundingClientRect();
+    const placement = computeAbsoluteControlPlacement(
+      this.cardControlsSettings.placement,
+      { width: cardRect.width, height: cardRect.height },
+      docOrigin,
+      { width: controlsRect.width || 96, height: controlsRect.height || 28 },
+      { x: this.cardControlsSettings.offsetX, y: this.cardControlsSettings.offsetY }
+    );
+    entry.overlayElement.style.left = `${Math.max(0, Math.round(placement.left))}px`;
+    entry.overlayElement.style.top = `${Math.max(0, Math.round(placement.top))}px`;
+    entry.overlayElement.classList.toggle('wb-asin-prefer-above', this.cardControlsSettings.preferAboveOverlays);
+    requestAnimationFrame(() => {
+      const nextRect = entry.overlayElement.getBoundingClientRect();
+      if (!nextRect.width || !nextRect.height) return;
+      const precise = computeAbsoluteControlPlacement(
+        this.cardControlsSettings.placement,
+        { width: cardRect.width, height: cardRect.height },
+        docOrigin,
+        { width: nextRect.width, height: nextRect.height },
+        { x: this.cardControlsSettings.offsetX, y: this.cardControlsSettings.offsetY }
+      );
+      entry.overlayElement.style.left = `${Math.max(0, Math.round(precise.left))}px`;
+      entry.overlayElement.style.top = `${Math.max(0, Math.round(precise.top))}px`;
+      if (reason === 'initial_attach' || reason === 'settings_changed' || reason === 'position_setting_changed') {
+        void logContent('card_controls_positioned', { sku: entry.sku, reason, top: Math.round(precise.top), left: Math.round(precise.left) });
+      }
+      this.logOcclusionIfNeeded(entry, nextRect, reason);
+    });
   }
 
   private showToast(message: string, undoType?: 'link_created' | 'rejected_set' | 'deferred_set' | 'group_added' | 'group_removed'): void {
@@ -576,8 +596,6 @@ class OverlayManager {
   private async handleActionTouch(sku: string, source: string): Promise<void> { const entry = this.overlays.get(sku); if (!entry) return; await sendMessage({ type: 'markCardTouched', wb_sku: sku, wb_url: entry.wbUrl, source }); }
   private async refreshCardState(sku: string, statusEl: HTMLSpanElement): Promise<void> {
     try {
-      const entry = this.overlays.get(sku);
-      if (entry) this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'before_state_refresh');
       const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean; groupCount: number; groupPreview: string[] }>({ type: 'getCardState', wb_sku: sku });
       statusEl.textContent =
         state.activeAsinLinked ? 'A'
@@ -598,7 +616,8 @@ class OverlayManager {
         ctx.context.seen_status ? `Seen: ${ctx.context.seen_status}` : ''
       ].filter(Boolean);
       statusEl.title = titleParts.join('\n');
-      if (entry) this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, 'after_state_refresh');
+      const entry = this.overlays.get(sku);
+      if (entry) this.applyCardControlPosition(entry, 'state_refresh');
       await this.updatePageStats();
     } catch { statusEl.textContent = '○'; }
   }
@@ -639,38 +658,37 @@ class OverlayManager {
   }
 
   private updatePositions(reason: string): void {
+    if (document.body.lastElementChild !== this.cardControlsRoot) document.body.appendChild(this.cardControlsRoot);
     for (const [sku, entry] of this.overlays.entries()) {
       if (!entry.cardElement.isConnected || !entry.linkElement.isConnected) {
         entry.overlayElement.remove();
-        entry.cardElement.classList.remove('wb-asin-card-selected');
         this.overlays.delete(sku);
         void logContent('card_controls_removed', { sku, reason });
-      } else if (reason === 'mutation' || reason === 'initial' || reason === 'interval' || reason === 'resize') {
-        this.bringCardControlsToFront(entry.cardElement, entry.overlayElement, reason);
+      } else if (reason === 'mutation' || reason === 'initial' || reason === 'interval' || reason === 'resize' || reason === 'position_setting_changed' || reason === 'popup_force_scan' || reason === 'scroll_end') {
+        this.applyCardControlPosition(entry, reason);
       }
     }
   }
-  private ensureCardSupportsAttachedControls(card: HTMLElement): void {
-    try {
-      if (window.getComputedStyle(card).position === 'static') {
-        card.style.position = 'relative';
-      }
-    } catch (error) {
-      void logContent('card_controls_attach_failed', { error: String(error) });
-    }
+  private logOcclusionIfNeeded(entry: OverlayEntry, rect: DOMRect, reason: string): void {
+    if (this.occlusionLogged >= 5) return;
+    const x = Math.floor(rect.left + rect.width / 2);
+    const y = Math.floor(rect.top + rect.height / 2);
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return;
+    const stack = document.elementsFromPoint(x, y);
+    const top = stack[0] as HTMLElement | undefined;
+    if (!top || entry.overlayElement.contains(top) || top === entry.overlayElement) return;
+    this.occlusionLogged += 1;
+    void logContent('card_controls_occluded', { sku: entry.sku, reason, top_tag: top.tagName, top_class: top.className?.toString?.().slice(0, 120) || '' });
   }
-  private bringCardControlsToFront(card: HTMLElement, controls: HTMLDivElement, reason: string): void {
-    if (!card.isConnected || !controls.isConnected) return;
-    if (controls.parentElement !== card) {
-      card.appendChild(controls);
-      void logContent('card_controls_reparented', { reason });
-      return;
-    }
-    const isLast = card.lastElementChild === controls;
-    if (shouldReparentCardControls(isLast)) {
-      card.appendChild(controls);
-      void logContent('card_controls_brought_to_front', { reason });
-    }
+  private ensureCardControlsRoot(): HTMLDivElement {
+    const existing = document.getElementById('wb-asin-card-controls-root') as HTMLDivElement | null;
+    if (existing) return existing;
+    const root = document.createElement('div');
+    root.id = 'wb-asin-card-controls-root';
+    root.setAttribute('style', cardControlsRootStyle());
+    document.body.appendChild(root);
+    void logContent('card_controls_absolute_root_created', {});
+    return root;
   }
   private resolvePlacement(card: HTMLElement, rect: DOMRect, viewport: { width: number; height: number }): Exclude<OverlayPosition, 'auto'> {
     if (this.overlayPosition !== 'auto') return this.overlayPosition;
@@ -709,7 +727,7 @@ class OverlayManager {
     if (document.getElementById('wb-asin-card-controls-style')) return;
     const style = document.createElement('style');
     style.id = 'wb-asin-card-controls-style';
-    style.textContent = `.wb-asin-card-controls{position:absolute !important;display:inline-flex !important;align-items:center !important;gap:4px !important;background:rgba(255,255,255,.97) !important;border:1px solid #7a38ff !important;border-radius:10px !important;padding:3px 6px !important;box-shadow:0 3px 10px rgba(30,20,60,.28) !important;pointer-events:none !important;z-index:2147483647 !important;font-family:Arial,sans-serif !important;box-sizing:border-box !important}.wb-asin-card-controls.wb-asin-prefer-above{box-shadow:0 4px 12px rgba(30,20,60,.36) !important;border-color:#5f20d4 !important;background:#fff !important}.wb-asin-card-controls button,.wb-asin-card-controls input,.wb-asin-card-controls [role="button"]{all:initial;pointer-events:auto !important;box-sizing:border-box !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls .wb-amz-btn,.wb-asin-card-controls .wb-amz-menu-btn{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-asin-card-controls .wb-amz-menu-btn{padding:4px 6px}.wb-asin-card-controls .wb-amz-status{all:initial;color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center;cursor:pointer;pointer-events:auto !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls.selected{outline:2px solid #18a058}.wb-asin-card-controls .wb-amz-select{margin:0}.wb-asin-card-selected{outline:2px solid rgba(24,160,88,.25);outline-offset:-2px}`;
+    style.textContent = `#wb-asin-card-controls-root{${cardControlsRootStyle()}}.wb-asin-card-controls{position:absolute !important;display:inline-flex !important;align-items:center !important;gap:4px !important;background:rgba(255,255,255,.97) !important;border:1px solid #7a38ff !important;border-radius:10px !important;padding:3px 6px !important;box-shadow:0 3px 10px rgba(30,20,60,.28) !important;pointer-events:none !important;z-index:2147483647 !important;font-family:Arial,sans-serif !important;box-sizing:border-box !important}.wb-asin-card-controls.wb-asin-prefer-above{box-shadow:0 4px 12px rgba(30,20,60,.36) !important;border-color:#5f20d4 !important;background:#fff !important}.wb-asin-card-controls button,.wb-asin-card-controls input,.wb-asin-card-controls [role="button"]{all:initial;pointer-events:auto !important;box-sizing:border-box !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls .wb-amz-btn,.wb-asin-card-controls .wb-amz-menu-btn{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-asin-card-controls .wb-amz-menu-btn{padding:4px 6px}.wb-asin-card-controls .wb-amz-status{all:initial;color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center;cursor:pointer;pointer-events:auto !important;font-family:Arial,sans-serif !important}.wb-asin-card-controls.selected{outline:2px solid #18a058}.wb-asin-card-controls .wb-amz-select{margin:0}`;
     document.head.appendChild(style);
     void logContent('card_controls_zindex_applied', { z_index: 2147483647 });
   }
@@ -728,7 +746,13 @@ async function startContentScript(): Promise<void> {
   });
   let pendingReason = 'initial'; let scanTimer: number | null = null;
   const scheduleScan = (reason: string): void => { pendingReason = reason === 'popup_force_scan' ? reason : pendingReason === 'popup_force_scan' ? pendingReason : reason; if (scanTimer !== null) return; scanTimer = window.setTimeout(() => { scan(manager, pendingReason); pendingReason = 'idle'; scanTimer = null; }, reason === 'popup_force_scan' ? 0 : 350); };
-  const observer = new MutationObserver(() => scheduleScan('mutation')); observer.observe(document.documentElement, { childList: true, subtree: true }); window.addEventListener('scroll', () => scheduleScan('scroll'), { passive: true }); window.addEventListener('resize', () => scheduleScan('resize')); setInterval(() => scheduleScan('interval'), 8000); scheduleScan('initial');
+  const observer = new MutationObserver(() => scheduleScan('mutation')); observer.observe(document.documentElement, { childList: true, subtree: true });
+  let scrollEndTimer: number | null = null;
+  window.addEventListener('scroll', () => {
+    if (scrollEndTimer !== null) window.clearTimeout(scrollEndTimer);
+    scrollEndTimer = window.setTimeout(() => scheduleScan('scroll_end'), 200);
+  }, { passive: true });
+  window.addEventListener('resize', () => scheduleScan('resize')); setInterval(() => scheduleScan('interval'), 8000); scheduleScan('initial');
 }
 
 type ScanStats = { linksFound: number; skuExtracted: number; overlaysInjected: number; sampleSkus: string[] };
