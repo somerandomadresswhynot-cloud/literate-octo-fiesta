@@ -17,6 +17,7 @@ const verboseLoggingEl = document.getElementById('verbose-logging') as HTMLInput
 
 (document.getElementById('import-btn') as HTMLButtonElement).addEventListener('click', async () => runImport('import'));
 (document.getElementById('restore-btn') as HTMLButtonElement).addEventListener('click', async () => runImport('restore'));
+(document.getElementById('restore-json-btn') as HTMLButtonElement).addEventListener('click', async () => runAllInOneRestore());
 (document.getElementById('csv-export-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('csv_state', exportCsvStateFiles));
 (document.getElementById('debug-export-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('debug_log', exportDebugLog));
 (document.getElementById('snapshot-export-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('diagnostic_snapshot', exportDiagnosticSnapshot));
@@ -51,6 +52,24 @@ async function runImport(mode: 'import' | 'restore'): Promise<void> {
 
   const result = await sendMessage<{ ok: boolean; summary: Record<string, unknown> }>({ type: 'importStateFiles', files, mode });
   importStatus.textContent = JSON.stringify(result.summary, null, 2);
+  await refreshSummary();
+}
+
+async function runAllInOneRestore(): Promise<void> {
+  const selected = Array.from(importInput.files ?? []).find((file) => file.name.endsWith('.json'));
+  if (!selected) {
+    importStatus.textContent = 'Select an all-in-one JSON backup file first.';
+    return;
+  }
+  const payload = JSON.parse(await selected.text());
+  const validation = await sendMessage<{ ok: boolean; fatalErrors: string[]; warnings: string[]; summary: Record<string, unknown> }>({ type: 'validateAllInOneBackup', payload });
+  importStatus.textContent = `Dry run summary:\n${JSON.stringify(validation.summary, null, 2)}`;
+  if (validation.fatalErrors.length > 0) return;
+  const confirmed = confirm('Restore will replace local IndexedDB state. Continue?');
+  if (!confirmed) return;
+  const restored = await sendMessage<{ ok: boolean; restored: boolean; summary: Record<string, unknown> }>({ type: 'restoreAllInOneBackup', payload });
+  importStatus.textContent = `Restore completed:\n${JSON.stringify(restored.summary, null, 2)}`;
+  updateStatusPanel({ action: 'restore_all_in_one_json', filename: selected.name });
   await refreshSummary();
 }
 
@@ -167,7 +186,7 @@ function triggerDownload(filename: string, content: string, contentType: string)
 
 async function readSelectedFiles(): Promise<Record<string, string>> {
   const selected = Array.from(importInput.files ?? []);
-  const supported = new Set(['amazon_products.csv', 'wb_products.csv', 'asin_links.csv', 'groups.csv', 'group_members.csv', 'events.csv', 'meta.json']);
+  const supported = new Set(['amazon_products.csv', 'wb_products.csv', 'asin_links.csv', 'groups.csv', 'group_members.csv', 'events.csv', 'meta.json', 'debug_log.json']);
   const entries = await Promise.all(selected.filter((file) => supported.has(file.name)).map(async (file) => [file.name, await file.text()] as const));
   return Object.fromEntries(entries);
 }

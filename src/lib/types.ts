@@ -86,6 +86,7 @@ export type MetaRecord = {
 };
 
 export type DebugEntry = {
+  debug_log_id?: string;
   ts: string;
   level: 'info' | 'error';
   action: string;
