@@ -20,6 +20,20 @@ export function buildStatusTooltip(input: { linksCount: number; firstLink?: stri
   return parts.join('\n');
 }
 
+export function normalizeCardControlsCount(existingCount: number): { shouldCreate: boolean; shouldTrimDuplicates: boolean } {
+  return {
+    shouldCreate: existingCount === 0,
+    shouldTrimDuplicates: existingCount > 1
+  };
+}
+
+export function computeFloatingMenuPosition(input: { left: number; bottom: number; viewportWidth: number }): { left: number; top: number } {
+  return {
+    left: Math.max(8, Math.min(input.left, input.viewportWidth - 220)),
+    top: input.bottom + 4
+  };
+}
+
 export function categorizeBulkConflict(items: Array<{ linksCount: number; linkedToTarget: boolean; linkedToOther: boolean; rejected: boolean; deferred: boolean }>): { noConflict: number; alreadyLinked: number; linkedOther: number; rejected: number; deferred: number; multipleLinks: number } {
   return items.reduce((acc, item) => {
     if (item.linksCount === 0) acc.noConflict += 1;

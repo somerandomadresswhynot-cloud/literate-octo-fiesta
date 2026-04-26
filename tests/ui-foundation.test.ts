@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { filterAndRankAsinResults } from '../src/lib/asinSearch.js';
-import { buildReasonPayload, buildStatusTooltip, categorizeBulkConflict, mapConflictResolution } from '../src/content/ui-helpers.js';
+import { buildReasonPayload, buildStatusTooltip, categorizeBulkConflict, computeFloatingMenuPosition, mapConflictResolution, normalizeCardControlsCount } from '../src/content/ui-helpers.js';
 
 describe('ui foundation helpers', () => {
   test('asin ranking defaults keep active first', () => {
@@ -32,5 +32,16 @@ describe('ui foundation helpers', () => {
     const c = categorizeBulkConflict([{ linksCount: 0, linkedToTarget: false, linkedToOther: false, rejected: false, deferred: false }, { linksCount: 2, linkedToTarget: true, linkedToOther: true, rejected: true, deferred: true }]);
     expect(c.noConflict).toBe(1);
     expect(c.multipleLinks).toBe(1);
+  });
+
+  test('card controls duplicate normalization helper', () => {
+    expect(normalizeCardControlsCount(0)).toEqual({ shouldCreate: true, shouldTrimDuplicates: false });
+    expect(normalizeCardControlsCount(1)).toEqual({ shouldCreate: false, shouldTrimDuplicates: false });
+    expect(normalizeCardControlsCount(3)).toEqual({ shouldCreate: false, shouldTrimDuplicates: true });
+  });
+
+  test('menu position helper keeps dropdown in viewport bounds', () => {
+    expect(computeFloatingMenuPosition({ left: 2, bottom: 20, viewportWidth: 400 })).toEqual({ left: 8, top: 24 });
+    expect(computeFloatingMenuPosition({ left: 390, bottom: 40, viewportWidth: 400 })).toEqual({ left: 180, top: 44 });
   });
 });

@@ -1,5 +1,5 @@
 import { sendMessage } from '../lib/runtime.js';
-import { buildReasonPayload, DEFER_REASONS, mapConflictResolution, REJECT_REASONS } from './ui-helpers.js';
+import { buildReasonPayload, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS } from './ui-helpers.js';
 
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
 const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
@@ -13,6 +13,7 @@ type SearchResult = { asin: string; title: string; brand: string; comment: strin
 type OverlayEntry = {
   sku: string; wbUrl: string; linkElement: HTMLAnchorElement; cardElement: HTMLElement; overlayElement: HTMLDivElement;
   statusElement: HTMLSpanElement; buttonElement: HTMLButtonElement; menuButtonElement: HTMLButtonElement; selectElement: HTMLInputElement; hoverTimer: number | null;
+  lastCardState: string;
 };
 
 declare global { interface Window { __wbAsinContentBooted?: boolean; } }
@@ -73,7 +74,9 @@ class OverlayManager {
     this.linkTypeSelect.addEventListener('change', () => { void sendMessage({ type: 'setDefaultLinkType', linkType: this.linkTypeSelect.value }); });
     document.addEventListener('click', () => this.closeMenu());
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeTopLayer(); });
+    window.addEventListener('scroll', () => this.closeMenu(), { passive: true });
     setInterval(() => { void this.refreshPanelContext(); }, 3500);
+    void logContent('card_controls_scroll_strategy', { strategy: 'attached' });
   }
 
   private closeTopLayer(): void {
@@ -84,8 +87,20 @@ class OverlayManager {
   upsertFromAnchor(anchor: HTMLAnchorElement, sku: string, wbUrl: string): void {
     const card = this.findCardContainer(anchor);
     const existing = this.overlays.get(sku);
-    if (existing) { existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl; return; }
-    const overlay = document.createElement('div'); overlay.className = 'wb-amz-overlay'; overlay.dataset.wbSku = sku;
+    if (existing) {
+      existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl;
+      if (!card.contains(existing.overlayElement)) card.appendChild(existing.overlayElement);
+      this.ensureCardSupportsAttachedControls(card);
+      void logContent('card_controls_updated', { sku });
+      return;
+    }
+    const duplicates = card.querySelectorAll<HTMLDivElement>(`.wb-asin-card-controls[data-wb-sku="${sku}"]`);
+    const normalize = normalizeCardControlsCount(duplicates.length);
+    const duplicate = duplicates[0] ?? null;
+    if (normalize.shouldTrimDuplicates) {
+      for (let i = 1; i < duplicates.length; i += 1) duplicates[i].remove();
+    }
+    const overlay = duplicate ?? document.createElement('div'); overlay.className = 'wb-amz-overlay wb-asin-card-controls'; overlay.dataset.wbSku = sku;
     const status = document.createElement('span'); status.className = 'wb-amz-status'; status.textContent = '·';
     status.addEventListener('click', (event) => {
       event.preventDefault();
@@ -98,10 +113,11 @@ class OverlayManager {
     menuBtn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.openMenu(sku, menuBtn); });
     const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'wb-amz-select';
     select.addEventListener('change', async () => { await this.handleActionTouch(sku, 'select'); this.toggleSelection(sku, select.checked); });
-    overlay.append(select, status, btn, menuBtn);
-    this.layer.appendChild(overlay);
+    if (!duplicate) overlay.append(select, status, btn, menuBtn);
+    this.ensureCardSupportsAttachedControls(card);
+    card.appendChild(overlay);
 
-    const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null };
+    const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null, lastCardState: '' };
     card.addEventListener('mouseenter', () => {
       if (entry.hoverTimer !== null) return;
       entry.hoverTimer = window.setTimeout(() => { entry.hoverTimer = null; void sendMessage({ type: 'markSeenByHover', wb_sku: sku, wb_url: entry.wbUrl }).then(() => this.refreshCardState(sku, status)).catch(() => {}); }, 1200);
@@ -111,6 +127,7 @@ class OverlayManager {
     if (this.selectedSkus.has(sku)) select.checked = true;
     void this.refreshCardState(sku, status);
     void this.updatePageStats();
+    void logContent('card_controls_attached', { sku });
   }
 
   private toggleSelection(sku: string, selected: boolean): void {
@@ -118,6 +135,7 @@ class OverlayManager {
     if (!entry) return;
     if (selected) this.selectedSkus.add(sku); else this.selectedSkus.delete(sku);
     entry.overlayElement.classList.toggle('selected', selected);
+    entry.cardElement.classList.toggle('wb-asin-card-selected', selected);
     this.selectedInfoEl.textContent = this.selectedSkus.size > 0 ? `Selected: ${this.selectedSkus.size}` : 'Bulk actions appear after selecting cards.';
     this.bulkActionsEl.style.display = this.selectedSkus.size > 0 ? 'flex' : 'none';
     void logContent('selection_changed', { selected_count: this.selectedSkus.size });
@@ -134,7 +152,7 @@ class OverlayManager {
       if (!this.selectedSkus.has(sku)) continue;
       this.selectedSkus.delete(sku);
       const entry = this.overlays.get(sku);
-      if (entry) { entry.selectElement.checked = false; entry.overlayElement.classList.remove('selected'); }
+      if (entry) { entry.selectElement.checked = false; entry.overlayElement.classList.remove('selected'); entry.cardElement.classList.remove('wb-asin-card-selected'); }
     }
     this.bulkActionsEl.style.display = 'none';
     this.selectedInfoEl.textContent = 'Bulk actions appear after selecting cards.';
@@ -144,7 +162,8 @@ class OverlayManager {
     this.closeModal(); this.closeMenu();
     const menu = await this.buildMenu(sku);
     const rect = trigger.getBoundingClientRect();
-    menu.style.left = `${Math.max(8, rect.left)}px`; menu.style.top = `${rect.bottom + 4}px`;
+    const pos = computeFloatingMenuPosition({ left: rect.left, bottom: rect.bottom, viewportWidth: window.innerWidth });
+    menu.style.left = `${pos.left}px`; menu.style.top = `${pos.top}px`;
     this.dropdownLayer.appendChild(menu); this.activeMenu = menu;
     void logContent('ui_menu_opened', { sku });
   }
@@ -571,21 +590,23 @@ class OverlayManager {
   }
 
   private updatePositions(reason: string): void {
-    const viewport = { width: window.innerWidth, height: window.innerHeight };
     for (const [sku, entry] of this.overlays.entries()) {
-      if (!entry.cardElement.isConnected || !entry.linkElement.isConnected) { entry.overlayElement.remove(); this.overlays.delete(sku); continue; }
-      const cardRect = entry.cardElement.getBoundingClientRect();
-      if (cardRect.width <= 0 || cardRect.height <= 0 || cardRect.bottom < 0 || cardRect.top > viewport.height) { entry.overlayElement.style.display = 'none'; continue; }
-      const placement = this.resolvePlacement(entry.cardElement, cardRect, viewport);
-      const overlayRect = entry.overlayElement.getBoundingClientRect();
-      const width = overlayRect.width || 90; const height = overlayRect.height || 28; const margin = 8;
-      let left = cardRect.left + margin; let top = cardRect.top + margin;
-      if (placement.includes('right')) left = cardRect.right - width - margin;
-      if (placement.includes('bottom')) top = cardRect.bottom - height - margin;
-      left = Math.max(0, Math.min(viewport.width - width, left)); top = Math.max(0, Math.min(viewport.height - height, top));
-      entry.overlayElement.style.display = 'inline-flex'; entry.overlayElement.style.left = `${Math.round(left)}px`; entry.overlayElement.style.top = `${Math.round(top)}px`;
+      if (!entry.cardElement.isConnected || !entry.linkElement.isConnected) {
+        entry.overlayElement.remove();
+        entry.cardElement.classList.remove('wb-asin-card-selected');
+        this.overlays.delete(sku);
+        void logContent('card_controls_removed', { sku, reason });
+      }
     }
-    void logContent('overlay_position_updated', { reason, visible_count: this.overlays.size });
+  }
+  private ensureCardSupportsAttachedControls(card: HTMLElement): void {
+    try {
+      if (window.getComputedStyle(card).position === 'static') {
+        card.style.position = 'relative';
+      }
+    } catch (error) {
+      void logContent('card_controls_attach_failed', { error: String(error) });
+    }
   }
   private resolvePlacement(card: HTMLElement, rect: DOMRect, viewport: { width: number; height: number }): Exclude<OverlayPosition, 'auto'> {
     if (this.overlayPosition !== 'auto') return this.overlayPosition;
@@ -601,7 +622,8 @@ class OverlayManager {
   private mountShadow(): void {
     if (this.shadow.querySelector('style')) return;
     const style = document.createElement('style');
-    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-overlay{position:fixed;display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.96);border:1px solid #7a38ff;border-radius:10px;padding:3px 6px;box-shadow:0 2px 6px rgba(30,20,60,.2);pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-overlay.selected{outline:2px solid #18a058}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:10px;padding:6px 10px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:340px;max-height:75vh;overflow:auto;background:#fff;border:1px solid #ccbaff;border-radius:10px;padding:10px;display:none;pointer-events:auto;font:12px Arial,sans-serif}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0 0 8px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
+    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:10px;padding:6px 10px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:340px;max-height:75vh;overflow:auto;background:#fff;border:1px solid #ccbaff;border-radius:10px;padding:10px;display:none;pointer-events:auto;font:12px Arial,sans-serif}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0 0 8px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
+    this.ensureCardDomStyle();
     const header = document.createElement('h3'); header.textContent = 'WB ↔ Amazon';
     const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => this.panel.classList.remove('open'));
     const headerRow = document.createElement('div'); headerRow.className = 'row'; headerRow.append(header, close);
@@ -619,6 +641,13 @@ class OverlayManager {
     this.panel.append(headerRow, asinRow, this.activeAsinEl, setRow, this.statsEl, this.selectedInfoEl, this.bulkActionsEl);
     this.shadow.append(style, this.layer, this.dropdownLayer, this.modalLayer, this.toastLayer, this.panelButton, this.panel);
   }
+  private ensureCardDomStyle(): void {
+    if (document.getElementById('wb-asin-card-controls-style')) return;
+    const style = document.createElement('style');
+    style.id = 'wb-asin-card-controls-style';
+    style.textContent = `.wb-asin-card-controls{all:initial;position:absolute;left:8px;top:8px;display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.96);border:1px solid #7a38ff;border-radius:10px;padding:3px 6px;box-shadow:0 2px 6px rgba(30,20,60,.2);pointer-events:auto;z-index:20;font-family:Arial,sans-serif;box-sizing:border-box}.wb-asin-card-controls *{box-sizing:border-box;font-family:Arial,sans-serif}.wb-asin-card-controls.selected{outline:2px solid #18a058}.wb-asin-card-controls .wb-amz-select{margin:0}.wb-asin-card-selected{outline:2px solid rgba(24,160,88,.25);outline-offset:-2px}`;
+    document.head.appendChild(style);
+  }
 }
 
 if (!window[CONTENT_BOOT_FLAG]) { window[CONTENT_BOOT_FLAG] = true; void startContentScript(); }
@@ -633,7 +662,7 @@ async function startContentScript(): Promise<void> {
   });
   let pendingReason = 'initial'; let scanTimer: number | null = null;
   const scheduleScan = (reason: string): void => { pendingReason = reason === 'popup_force_scan' ? reason : pendingReason === 'popup_force_scan' ? pendingReason : reason; if (scanTimer !== null) return; scanTimer = window.setTimeout(() => { scan(manager, pendingReason); pendingReason = 'idle'; scanTimer = null; }, reason === 'popup_force_scan' ? 0 : 350); };
-  const observer = new MutationObserver(() => scheduleScan('mutation')); observer.observe(document.documentElement, { childList: true, subtree: true }); window.addEventListener('scroll', () => scheduleScan('scroll'), { passive: true }); window.addEventListener('resize', () => manager.schedulePositionUpdate('resize')); setInterval(() => scheduleScan('interval'), 8000); scheduleScan('initial');
+  const observer = new MutationObserver(() => scheduleScan('mutation')); observer.observe(document.documentElement, { childList: true, subtree: true }); window.addEventListener('scroll', () => scheduleScan('scroll'), { passive: true }); window.addEventListener('resize', () => scheduleScan('resize')); setInterval(() => scheduleScan('interval'), 8000); scheduleScan('initial');
 }
 
 type ScanStats = { linksFound: number; skuExtracted: number; overlaysInjected: number; sampleSkus: string[] };
