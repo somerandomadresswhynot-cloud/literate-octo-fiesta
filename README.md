@@ -140,6 +140,17 @@ npm run test
 8. Use **Restore from exported files** and select the exported CSV/JSON files.
 9. Verify storage summary repopulates, active ASIN is restored, and linked WB SKU exists again.
 
+
+## Manual diagnostics download test
+
+1. Import data (`amazon_products.csv` minimum).
+2. Open popup and set active ASIN.
+3. Open Wildberries page and link one card with **A+**.
+4. Open Options page.
+5. Click **Download debug_log.json**.
+6. Click **Download diagnostic_snapshot.json**.
+7. Verify both files appear in browser Downloads and open as valid JSON.
+
 ## Notes
 
 - SKU detection is strictly URL-based from visible Wildberries product links.

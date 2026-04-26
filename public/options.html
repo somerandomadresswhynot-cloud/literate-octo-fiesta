@@ -4,12 +4,13 @@
   <meta charset="utf-8" />
   <title>WB Matcher Options</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 16px; max-width: 860px; }
+    body { font-family: Arial, sans-serif; margin: 16px; max-width: 900px; }
     .row { margin-bottom: 12px; }
     button { margin-right: 8px; margin-top: 6px; }
     pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow-x: auto; }
     .section { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
     .warn { color: #9a3d00; font-weight: bold; }
+    .status-grid { display: grid; grid-template-columns: 180px 1fr; gap: 6px 12px; }
   </style>
 </head>
 <body>
@@ -27,11 +28,23 @@
   </div>
 
   <div class="section">
-    <h3>Export data</h3>
+    <h3>Export data & diagnostics</h3>
     <div class="row">
-      <button id="backup-btn">Create backup/export now</button>
-      <button id="export-btn">Export backup bundle</button>
-      <div id="export-status"></div>
+      <button id="debug-export-btn">Download debug_log.json</button>
+      <button id="snapshot-export-btn">Download diagnostic_snapshot.json</button>
+      <button id="csv-export-btn">Download CSV state files</button>
+      <button id="json-backup-btn">Download all-in-one JSON backup</button>
+    </div>
+    <pre id="export-status"></pre>
+  </div>
+
+  <div class="section">
+    <h3>Export status panel</h3>
+    <div class="status-grid">
+      <div><strong>Last action</strong></div><div id="status-last-action">-</div>
+      <div><strong>Last success</strong></div><div id="status-last-success">-</div>
+      <div><strong>Last error</strong></div><div id="status-last-error">-</div>
+      <div><strong>Last downloaded filename</strong></div><div id="status-last-file">-</div>
     </div>
   </div>
 

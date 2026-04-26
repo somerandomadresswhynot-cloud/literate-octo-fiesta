@@ -13,6 +13,7 @@ type Request =
   | { type: 'linkSku'; wb_sku: string; wb_url: string }
   | { type: 'getCardState'; wb_sku: string }
   | { type: 'exportState' }
+  | { type: 'getExportData' }
   | { type: 'storageSummary' }
   | { type: 'clearDb' }
   | { type: 'getOverlayPosition' }
@@ -73,6 +74,20 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
     return { files: exported.files, backupName: exported.name };
   }
 
+
+  if (message.type === 'getExportData') {
+    const [amazon, wb, links, groups, groupMembers, events, meta, debugLog] = await Promise.all([
+      getAll('amazon_products'),
+      getAll('wb_products'),
+      getAll('asin_links'),
+      getAll('groups'),
+      getAll('group_members'),
+      getAll('events'),
+      getMeta(),
+      getAll('debug_log')
+    ]);
+    return { data: { amazon_products: amazon, wb_products: wb, asin_links: links, groups, group_members: groupMembers, events, meta, debug_log: debugLog } };
+  }
   if (message.type === 'storageSummary') {
     const [amazon, wb, links, groups, groupMembers, events, meta] = await Promise.all([
       getAll('amazon_products'),
