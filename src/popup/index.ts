@@ -1,4 +1,5 @@
 import { sendMessage } from '../lib/runtime.js';
+import { toLinkTypeHint, toLinkTypeLabel, toWorkflowStatusLabel } from '../content/ui-labels.js';
 
 const countEl = document.getElementById('amazon-count') as HTMLSpanElement;
 const activeEl = document.getElementById('active-asin') as HTMLSpanElement;
@@ -32,7 +33,8 @@ async function boot(): Promise<void> {
   for (const lt of state.linkTypes || []) {
     const opt = document.createElement('option');
     opt.value = lt;
-    opt.textContent = lt;
+    opt.textContent = toLinkTypeLabel(lt);
+    opt.title = toLinkTypeHint(lt);
     defaultLinkTypeEl.appendChild(opt);
   }
   defaultLinkTypeEl.value = state.defaultLinkType || 'candidate';
@@ -46,7 +48,7 @@ async function search(): Promise<void> {
     const li = document.createElement('li');
     const button = document.createElement('button');
     button.className = 'result-item';
-    const bits = [`${product.asin}`, product.title || '(no title)', product.brand || '', product.workflow_status || '', product.comment || ''].filter(Boolean);
+    const bits = [`${product.asin}`, product.title || '(no title)', product.brand || '', toWorkflowStatusLabel(product.workflow_status || ''), product.comment || ''].filter(Boolean);
     button.textContent = bits.join(' — ');
     button.addEventListener('click', async () => {
       await sendMessage<{ ok: boolean }>({ type: 'setActiveAsin', asin: product.asin });

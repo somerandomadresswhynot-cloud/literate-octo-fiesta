@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { filterAndRankAsinResults } from '../src/lib/asinSearch.js';
-import { buildReasonPayload, buildStatusTooltip, cardControlsRootStyle, categorizeBulkConflict, computeAbsoluteControlPlacement, computeCardControlsPositionStyle, computeFloatingMenuPosition, mapConflictResolution, normalizeCardControlsCount, shouldReparentCardControls, toDocumentCoordinates } from '../src/content/ui-helpers.js';
+import { buildCardMenuSections, buildReasonPayload, buildStatsGrid, buildStatusTooltip, cardControlsRootStyle, categorizeBulkConflict, computeAbsoluteControlPlacement, computeCardControlsPositionStyle, computeFloatingMenuPosition, getImageFallbackLabel, mapConflictResolution, normalizeCardControlsCount, shouldReparentCardControls, toDocumentCoordinates } from '../src/content/ui-helpers.js';
+import { toLinkTypeLabel, toWorkflowStatusLabel } from '../src/content/ui-labels.js';
 
 describe('ui foundation helpers', () => {
   test('asin ranking defaults keep active first', () => {
@@ -77,5 +78,29 @@ describe('ui foundation helpers', () => {
     expect(css).toContain('position:absolute');
     expect(css).toContain('pointer-events:none');
     expect(css).toContain('z-index:2147483647');
+  });
+
+  test('friendly labels map stored link/workflow values', () => {
+    expect(toLinkTypeLabel('exact_match')).toBe('Exact match');
+    expect(toWorkflowStatusLabel('in_progress')).toBe('In progress');
+  });
+
+  test('stats labels/chips use user-friendly names', () => {
+    const chips = buildStatsGrid({ total: 2, seen: 1, linkedActive: 1, linkedTotal: 2, groups: 0, rejected: 0, deferred: 1, selected: 1 });
+    expect(chips.find((x) => x.key === 'linked_active')?.label).toBe('Linked to active');
+    expect(chips.find((x) => x.key === 'linked_total')?.label).toBe('Linked total');
+  });
+
+  test('menu item generation adapts to card state', () => {
+    const rows = buildCardMenuSections({ rejected: true, deferred: false, groupCount: 1, linked: true });
+    expect(rows).toContain('remove_rejection');
+    expect(rows).toContain('manage_groups');
+    expect(rows).toContain('show_links');
+    expect(rows).not.toContain('reject');
+  });
+
+  test('image fallback helper returns asin marker', () => {
+    expect(getImageFallbackLabel('b00x')).toBe('B');
+    expect(getImageFallbackLabel('')).toBe('ASIN');
   });
 });

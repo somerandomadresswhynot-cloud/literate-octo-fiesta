@@ -70,6 +70,38 @@ export function cardControlsRootStyle(): string {
   return 'position:absolute !important;top:0 !important;left:0 !important;width:0 !important;height:0 !important;pointer-events:none !important;z-index:2147483647 !important;isolation:isolate !important;';
 }
 
+export function getImageFallbackLabel(asin: string): string {
+  const clean = (asin || '').trim().toUpperCase();
+  if (!clean) return 'ASIN';
+  return clean[0];
+}
+
+export function buildStatsGrid(stats: { total: number; seen: number; linkedActive: number; linkedTotal: number; groups: number; rejected: number; deferred: number; selected: number }): Array<{ key: string; label: string; value: number; tip: string }> {
+  return [
+    { key: 'cards', label: 'Cards', value: stats.total, tip: 'Visible WB product cards with controls' },
+    { key: 'seen', label: 'Seen', value: stats.seen, tip: 'Cards hovered or touched in this session' },
+    { key: 'linked_active', label: 'Linked to active', value: stats.linkedActive, tip: 'Cards linked to the currently active ASIN' },
+    { key: 'linked_total', label: 'Linked total', value: stats.linkedTotal, tip: 'Cards linked to at least one ASIN' },
+    { key: 'groups', label: 'Groups', value: stats.groups, tip: 'Cards that belong to one or more groups' },
+    { key: 'rejected', label: 'Rejected', value: stats.rejected, tip: 'Cards marked as known non-matches' },
+    { key: 'deferred', label: 'Deferred', value: stats.deferred, tip: 'Cards postponed for later review' },
+    { key: 'selected', label: 'Selected', value: stats.selected, tip: 'Cards selected for bulk actions' }
+  ];
+}
+
+export function buildCardMenuSections(state: { rejected: boolean; deferred: boolean; groupCount: number; linked: boolean }): string[] {
+  const rows = ['add_active', 'add_asin', 'divider', 'add_group'];
+  if (state.groupCount > 0) rows.push('manage_groups');
+  rows.push('divider');
+  if (state.rejected) rows.push('remove_rejection', 'change_rejection');
+  else rows.push('reject');
+  if (state.deferred) rows.push('remove_deferred', 'change_deferred');
+  else rows.push('defer');
+  rows.push('divider', 'copy_url', 'context', 'history');
+  if (state.linked) rows.splice(rows.indexOf('context'), 0, 'show_links');
+  return rows;
+}
+
 export function categorizeBulkConflict(items: Array<{ linksCount: number; linkedToTarget: boolean; linkedToOther: boolean; rejected: boolean; deferred: boolean }>): { noConflict: number; alreadyLinked: number; linkedOther: number; rejected: number; deferred: number; multipleLinks: number } {
   return items.reduce((acc, item) => {
     if (item.linksCount === 0) acc.noConflict += 1;
