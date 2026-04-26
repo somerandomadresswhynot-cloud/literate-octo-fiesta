@@ -233,6 +233,98 @@ async function replaceStore(store: 'amazon_products' | 'wb_products' | 'asin_lin
   }
 }
 
+
+
+export type ValidationResult = {
+  validation_warnings: string[];
+  validation_errors: string[];
+  duplicate_active_link_count: number;
+};
+
+export async function validateLocalState(): Promise<ValidationResult> {
+  const [amazon, links, events] = await Promise.all([
+    getAll<AmazonProduct>('amazon_products'),
+    getAll<AsinLink>('asin_links'),
+    getAll<EventRecord>('events')
+  ]);
+
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  const asinSet = new Set(amazon.map((item) => item.asin));
+
+  const activeMap = new Map<string, AsinLink[]>();
+  for (const link of links) {
+    if (!link.link_id || !link.wb_sku || !link.asin) errors.push(`missing required fields in asin_links row: ${link.link_id || 'unknown'}`);
+    if (link.is_active === 'true' && !link.deleted_at) {
+      const key = `${link.wb_sku}::${link.asin}`;
+      const bucket = activeMap.get(key) ?? [];
+      bucket.push(link);
+      activeMap.set(key, bucket);
+    }
+    if (link.asin && !asinSet.has(link.asin)) warnings.push(`link points to unknown ASIN: ${link.link_id}/${link.asin}`);
+  }
+
+  let duplicateCount = 0;
+  for (const [key, dupes] of activeMap.entries()) {
+    if (dupes.length > 1) {
+      duplicateCount += dupes.length - 1;
+      warnings.push(`duplicate active links for ${key}: ${dupes.length}`);
+    }
+  }
+
+  for (const event of events) {
+    if (!event.event_id || !event.event_type || !event.created_at) errors.push(`event missing required fields: ${event.event_id || 'unknown'}`);
+    if (!event.payload_json) continue;
+    try { JSON.parse(event.payload_json); } catch {
+      warnings.push(`events payload_json invalid for event_id=${event.event_id || 'unknown'}`);
+    }
+  }
+
+  await writeDebug('validation_completed', { warnings: warnings.length, errors: errors.length, duplicate_active_link_count: duplicateCount });
+  return { validation_warnings: warnings, validation_errors: errors, duplicate_active_link_count: duplicateCount };
+}
+
+export async function repairDuplicateActiveLinks(): Promise<{ repaired_count: number; touched_links: string[] }> {
+  const links = await getAll<AsinLink>('asin_links');
+  const grouped = new Map<string, AsinLink[]>();
+  for (const link of links) {
+    if (link.is_active !== 'true' || link.deleted_at) continue;
+    const key = `${link.wb_sku}::${link.asin}`;
+    const bucket = grouped.get(key) ?? [];
+    bucket.push(link);
+    grouped.set(key, bucket);
+  }
+
+  const toUpdate: AsinLink[] = [];
+  const touched: string[] = [];
+  for (const bucket of grouped.values()) {
+    if (bucket.length <= 1) continue;
+    bucket.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '') || a.link_id.localeCompare(b.link_id));
+    const keep = bucket[0];
+    for (const dupe of bucket.slice(1)) {
+      dupe.is_active = 'false';
+      dupe.deleted_at = dupe.deleted_at || now();
+      dupe.updated_at = now();
+      toUpdate.push(dupe);
+      touched.push(dupe.link_id);
+      await putMany('events', [{
+        event_id: `evt_${crypto.randomUUID()}`,
+        operation_id: `op_${crypto.randomUUID()}`,
+        event_type: 'duplicate_link_deactivated',
+        wb_sku: dupe.wb_sku,
+        asin: dupe.asin,
+        group_id: '',
+        payload_json: JSON.stringify({ deactivated_link_id: dupe.link_id, kept_link_id: keep.link_id }),
+        created_at: now(),
+        client_id: 'local-extension'
+      }]);
+    }
+  }
+
+  if (toUpdate.length > 0) await putMany('asin_links', toUpdate);
+  await writeDebug('repair_duplicate_links', { repaired_count: toUpdate.length, touched_links: touched });
+  return { repaired_count: toUpdate.length, touched_links: touched };
+}
 function defaultMeta(): MetaRecord {
   return {
     schema_version: '1',
@@ -241,7 +333,8 @@ function defaultMeta(): MetaRecord {
     default_link_type: 'candidate',
     overlay_position: 'top-left',
     last_imported_at: '',
-    last_exported_at: ''
+    last_exported_at: '',
+    verbose_scan_logging: 'false'
   };
 }
 

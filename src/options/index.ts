@@ -13,6 +13,7 @@ const lastActionEl = document.getElementById('status-last-action') as HTMLDivEle
 const lastSuccessEl = document.getElementById('status-last-success') as HTMLDivElement;
 const lastErrorEl = document.getElementById('status-last-error') as HTMLDivElement;
 const lastFileEl = document.getElementById('status-last-file') as HTMLDivElement;
+const verboseLoggingEl = document.getElementById('verbose-logging') as HTMLInputElement;
 
 (document.getElementById('import-btn') as HTMLButtonElement).addEventListener('click', async () => runImport('import'));
 (document.getElementById('restore-btn') as HTMLButtonElement).addEventListener('click', async () => runImport('restore'));
@@ -20,6 +21,8 @@ const lastFileEl = document.getElementById('status-last-file') as HTMLDivElement
 (document.getElementById('debug-export-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('debug_log', exportDebugLog));
 (document.getElementById('snapshot-export-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('diagnostic_snapshot', exportDiagnosticSnapshot));
 (document.getElementById('json-backup-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('all_in_one_backup', exportAllInOneBackup));
+(document.getElementById('validate-state-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('validate_local_state', validateStateNow));
+(document.getElementById('repair-links-btn') as HTMLButtonElement).addEventListener('click', async () => runExportAction('repair_duplicate_links', repairDuplicateLinksNow));
 
 (document.getElementById('clear-btn') as HTMLButtonElement).addEventListener('click', async () => {
   const shouldProceed = confirm('This will clear local IndexedDB. Export backup first. Continue?');
@@ -29,7 +32,15 @@ const lastFileEl = document.getElementById('status-last-file') as HTMLDivElement
   importStatus.textContent = 'Local database cleared.';
 });
 
-void refreshSummary();
+void (async () => {
+  await refreshSummary();
+  const verbose = await sendMessage<{ ok: boolean; enabled: boolean }>({ type: 'getVerboseLogging' });
+  verboseLoggingEl.checked = verbose.enabled;
+})();
+
+verboseLoggingEl.addEventListener('change', () => {
+  void sendMessage({ type: 'setVerboseLogging', enabled: verboseLoggingEl.checked });
+});
 
 async function runImport(mode: 'import' | 'restore'): Promise<void> {
   const files = await readSelectedFiles();
@@ -67,6 +78,7 @@ async function exportDebugLog(): Promise<void> {
 async function exportDiagnosticSnapshot(): Promise<void> {
   const data = await sendMessage<{ ok: boolean; data: ExportDataPayload }>({ type: 'getExportData' });
   const summary = await sendMessage<{ ok: boolean; summary: Record<string, unknown> }>({ type: 'storageSummary' });
+  const validation = await sendMessage<{ ok: boolean; validation_warnings: string[]; validation_errors: string[]; duplicate_active_link_count: number }>({ type: 'validateLocalState' });
   const payload = createDiagnosticSnapshot({
     generated_at: new Date().toISOString(),
     extension_version: chrome.runtime.getManifest().version,
@@ -77,8 +89,11 @@ async function exportDiagnosticSnapshot(): Promise<void> {
     events: data.data.events,
     wb_products: data.data.wb_products,
     asin_links: data.data.asin_links,
-    validation_warnings: [],
-    validation_errors: []
+    validation_warnings: validation.validation_warnings,
+    validation_errors: validation.validation_errors,
+    duplicate_active_link_count: validation.duplicate_active_link_count,
+    debug_log_count: data.data.debug_log_count,
+    verbose_logging_enabled: data.data.verbose_logging_enabled
   });
   const filename = `wb-asin-diagnostic-snapshot-${timestampSafe()}.json`;
   triggerDownload(filename, JSON.stringify(payload, null, 2), 'application/json');
@@ -97,11 +112,27 @@ async function exportAllInOneBackup(): Promise<void> {
     group_members: data.data.group_members,
     events: data.data.events,
     meta: data.data.meta,
-    debug_logs: data.data.debug_log
+    debug_logs: data.data.debug_log,
+    validation_warnings: data.data.validation_warnings,
+    validation_errors: data.data.validation_errors,
+    duplicate_active_link_count: data.data.duplicate_active_link_count,
+    debug_log_count: data.data.debug_log_count,
+    verbose_logging_enabled: data.data.verbose_logging_enabled
   });
   const filename = `wb-asin-all-in-one-backup-${timestampSafe()}.json`;
   triggerDownload(filename, JSON.stringify(payload, null, 2), 'application/json');
   setExportStatus(`success: downloaded ${filename}`);
+}
+
+
+async function validateStateNow(): Promise<void> {
+  const result = await sendMessage<{ ok: boolean; validation_warnings: string[]; validation_errors: string[]; duplicate_active_link_count: number }>({ type: 'validateLocalState' });
+  setExportStatus(`success: validation completed\nwarnings=${result.validation_warnings.length}, errors=${result.validation_errors.length}, duplicate_active_link_count=${result.duplicate_active_link_count}`);
+}
+
+async function repairDuplicateLinksNow(): Promise<void> {
+  const result = await sendMessage<{ ok: boolean; repaired_count: number; touched_links: string[] }>({ type: 'repairDuplicateActiveLinks' });
+  setExportStatus(`success: repaired duplicates=${result.repaired_count}\nlinks=${result.touched_links.join(', ')}`);
 }
 
 async function runExportAction(action: string, operation: () => Promise<void>): Promise<void> {
@@ -170,6 +201,11 @@ type ExportDataPayload = {
   events: EventRecord[];
   meta: MetaRecord;
   debug_log: DebugEntry[];
+  validation_warnings: string[];
+  validation_errors: string[];
+  duplicate_active_link_count: number;
+  verbose_logging_enabled: boolean;
+  debug_log_count: number;
 };
 
 export {};

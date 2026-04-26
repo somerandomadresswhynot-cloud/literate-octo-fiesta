@@ -22,7 +22,7 @@ vi.mock('../src/lib/db.js', () => ({
   runtime: { getManifest: () => ({ version: '0.1.0-test' }) }
 };
 
-import { exportStateFiles, importStateFiles } from '../src/domain/state.js';
+import { exportStateFiles, importStateFiles, repairDuplicateActiveLinks, validateLocalState } from '../src/domain/state.js';
 
 describe('state import/export', () => {
   beforeEach(() => {
@@ -63,4 +63,29 @@ describe('state import/export', () => {
     const summary = await importStateFiles(exported.files, 'restore');
     expect(summary.imported.amazon_products).toBe(1);
   });
+
+
+  test('validateLocalState reports duplicate active links', async () => {
+    await importStateFiles({
+      'amazon_products.csv': 'asin,amazon_url,title,brand,image_url,category,keywords,comment,priority,workflow_status,checked_result,last_checked_at,created_at,updated_at\nA1,url,t,b,i,c,k,c,p,w,r,l,ca,ua',
+      'asin_links.csv': 'link_id,wb_sku,asin,link_type,is_active,comment,created_at,updated_at,deleted_at,created_by_action\n1,sku,A1,candidate,true,,2026-01-01,2026-01-01,,A+\n2,sku,A1,candidate,true,,2026-01-02,2026-01-02,,A+'
+    }, 'import');
+    const result = await validateLocalState();
+    expect(result.duplicate_active_link_count).toBe(1);
+    expect(result.validation_warnings.some((w) => w.includes('duplicate active links'))).toBe(true);
+  });
+
+  test('repairDuplicateActiveLinks deactivates later duplicate without deleting', async () => {
+    await importStateFiles({
+      'amazon_products.csv': 'asin,amazon_url,title,brand,image_url,category,keywords,comment,priority,workflow_status,checked_result,last_checked_at,created_at,updated_at\nA1,url,t,b,i,c,k,c,p,w,r,l,ca,ua',
+      'asin_links.csv': 'link_id,wb_sku,asin,link_type,is_active,comment,created_at,updated_at,deleted_at,created_by_action\n1,sku,A1,candidate,true,,2026-01-01,2026-01-01,,A+\n2,sku,A1,candidate,true,,2026-01-02,2026-01-02,,A+'
+    }, 'import');
+    const repaired = await repairDuplicateActiveLinks();
+    expect(repaired.repaired_count).toBe(1);
+    expect(stores.asin_links.length).toBe(2);
+    const deactivated = stores.asin_links.find((x) => x.link_id === '2');
+    expect(deactivated.is_active).toBe('false');
+    expect(Boolean(deactivated.deleted_at)).toBe(true);
+  });
+
 });

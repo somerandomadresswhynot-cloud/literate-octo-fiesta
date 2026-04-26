@@ -82,6 +82,7 @@ export type MetaRecord = {
   overlay_position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
   last_imported_at: string;
   last_exported_at: string;
+  verbose_scan_logging: 'true' | 'false';
 };
 
 export type DebugEntry = {

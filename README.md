@@ -151,6 +151,17 @@ npm run test
 6. Click **Download diagnostic_snapshot.json**.
 7. Verify both files appear in browser Downloads and open as valid JSON.
 
+
+## Manual stability test (duplicate + verbose logging)
+
+1. Link a card once with **A+**.
+2. Click **A+** repeatedly/quickly on the same card.
+3. Export backup.
+4. Verify only one active link exists for that `wb_sku + asin`.
+5. Open Options and click **Validate local state**.
+6. Confirm no duplicate active-link warning after repair/normal flow.
+7. Toggle **Verbose scan logging** on/off and verify scan logs become more/less detailed.
+
 ## Notes
 
 - SKU detection is strictly URL-based from visible Wildberries product links.
