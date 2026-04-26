@@ -144,6 +144,22 @@ npm run test
 8. Use **Restore from exported files** and select the exported CSV/JSON files.
 9. Verify storage summary repopulates, active ASIN is restored, and linked WB SKU exists again.
 
+## Manual test: all-in-one JSON restore safety
+
+1. Import `amazon_products.csv`.
+2. Select active ASIN.
+3. Open Wildberries.
+4. Click `A+` on 2 cards.
+5. Download all-in-one JSON backup.
+6. Clear local DB.
+7. Restore all-in-one JSON backup.
+8. Verify storage summary matches pre-clear counts.
+9. Reopen Wildberries and verify linked cards still show linked status.
+10. Click `A+` repeatedly on same card.
+11. Validate local state.
+12. Confirm no duplicate active link warning.
+13. Download diagnostic snapshot.
+
 
 ## Manual diagnostics download test
 

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const keyByStore: Record<string, string> = {
-  amazon_products: 'asin', wb_products: 'wb_sku', asin_links: 'link_id', groups: 'group_id', group_members: 'member_id', events: 'event_id', meta: 'schema_version', debug_log: 'ts'
+  amazon_products: 'asin', wb_products: 'wb_sku', asin_links: 'link_id', groups: 'group_id', group_members: 'member_id', events: 'event_id', meta: 'schema_version', debug_log: 'debug_log_id'
 };
 const stores: Record<string, any[]> = { amazon_products: [], wb_products: [], asin_links: [], groups: [], group_members: [], events: [], meta: [], debug_log: [] };
 
@@ -48,6 +48,16 @@ describe('domain actions', () => {
     const second = await linkWbSkuToActiveAsin('12345678', 'https://www.wildberries.ru/catalog/12345678/detail.aspx');
     expect(second.status).toBe('duplicate_skipped');
     expect(stores.asin_links.length).toBe(1);
+  });
+
+  test('parallel duplicate A+ creates one active link', async () => {
+    await setActiveAsin('B0PARALLEL');
+    const [a, b] = await Promise.all([
+      linkWbSkuToActiveAsin('parallel-sku', 'https://www.wildberries.ru/catalog/1/detail.aspx'),
+      linkWbSkuToActiveAsin('parallel-sku', 'https://www.wildberries.ru/catalog/1/detail.aspx')
+    ]);
+    expect([a.status, b.status].sort()).toEqual(['created', 'duplicate_skipped'].sort());
+    expect(stores.asin_links.filter((x) => x.wb_sku === 'parallel-sku' && x.is_active === 'true').length).toBe(1);
   });
 
   test('add second link creates second active link', async () => {

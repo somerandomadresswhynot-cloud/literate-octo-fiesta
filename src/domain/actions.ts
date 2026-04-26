@@ -1,6 +1,7 @@
-import { getAll, putMany } from '../lib/db.js';
+import { getAll, getAllByIndex, getByKey, putMany } from '../lib/db.js';
 import type { AmazonProduct, AsinLink, DebugEntry, EventRecord, MetaRecord, WbProduct } from '../lib/types.js';
 import { exportStateFiles } from './state.js';
+import { isActiveLink, normalizeLink, normalizeWbProduct, parseBooleanLike } from '../lib/normalize.js';
 
 const CLIENT_ID = 'local-extension';
 const inFlightLinkOps = new Map<string, Promise<LinkResult>>();
@@ -38,7 +39,7 @@ function now(): string { return new Date().toISOString(); }
 function uid(prefix: string): string { return `${prefix}_${crypto.randomUUID()}`; }
 
 async function log(action: string, details?: Record<string, unknown>, level: 'info' | 'error' = 'info'): Promise<void> {
-  const entry: DebugEntry = { ts: now(), level, action, details };
+  const entry: DebugEntry = { debug_log_id: uid('dbg'), ts: now(), level, action, details };
   await putMany('debug_log', [entry]);
 }
 
@@ -110,17 +111,17 @@ async function doCreateOrSkipLink(
   conflictResolution?: ConflictResolution,
   rejectedResolution?: RejectedResolution
 ): Promise<LinkResult> {
-  const [links, wbBefore] = await Promise.all([getAll<AsinLink>('asin_links'), getWbProduct(wb_sku)]);
+  const [links, wbBefore] = await Promise.all([getAllByIndex<AsinLink>('asin_links', 'wb_sku', wb_sku), getWbProduct(wb_sku)]);
 
-  if (wbBefore?.rejected === 'true' && !rejectedResolution) {
+  if (parseBooleanLike(wbBefore?.rejected) && !rejectedResolution) {
     await log('rejected_link_warning_shown', { wb_sku, asin });
     return { ok: true, status: 'rejected_confirmation_required' };
   }
-  if (wbBefore?.rejected === 'true' && rejectedResolution === 'clear_rejected') {
-    await upsertWbProduct(wb_sku, wb_url, { rejected: 'false', rejected_reason: '' }, wbBefore.seen_status === 'touched' ? 'touched' : 'seen');
+  if (parseBooleanLike(wbBefore?.rejected) && rejectedResolution === 'clear_rejected') {
+    await upsertWbProduct(wb_sku, wb_url, { rejected: 'false', rejected_reason: '' }, wbBefore?.seen_status === 'touched' ? 'touched' : 'seen');
   }
 
-  const activeForSku = links.filter((item) => item.wb_sku === wb_sku && item.is_active === 'true' && !item.deleted_at);
+  const activeForSku = links.map(normalizeLink).filter((item) => item.wb_sku === wb_sku && isActiveLink(item));
   const existing = activeForSku.find((item) => item.asin === asin);
   if (existing) {
     await log('duplicate_link_skipped', { wb_sku, asin, existing_link_id: existing.link_id });
@@ -154,9 +155,9 @@ async function doCreateOrSkipLink(
     await log('conflict_add_second_link', { wb_sku, asin, existing_count: conflicting.length });
   }
 
-  const link: AsinLink = {
+  const link: AsinLink = normalizeLink({
     link_id: uid('link'), wb_sku, asin, link_type: linkType, is_active: 'true', comment: '', created_at: ts, updated_at: ts, deleted_at: '', created_by_action: createdByAction
-  };
+  });
   await putMany('asin_links', [link]);
   await writeEvent('link_created', wb_sku, asin, { wb_url, link_id: link.link_id, link_type: linkType, created_by_action: createdByAction });
   await log('link_created', { wb_sku, asin, link_type: linkType, created_by_action: createdByAction });
@@ -193,7 +194,7 @@ export async function undoLastAction(): Promise<{ undone: boolean; action?: stri
   const action = lastUndoAction;
   lastUndoAction = null;
   if (action.type === 'link_created') {
-    const links = await getAll<AsinLink>('asin_links');
+    const links = await getAllByIndex<AsinLink>('asin_links', 'wb_sku', action.wb_sku);
     const match = links.find((link) => link.link_id === action.link_id && link.is_active === 'true');
     if (match) {
       const ts = now();
@@ -226,25 +227,25 @@ export async function undoLastAction(): Promise<{ undone: boolean; action?: stri
 }
 
 export async function getCardState(wb_sku: string): Promise<{ linked: boolean; activeAsinLinked: boolean; activeAsin: string; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean }> {
-  const [links, meta, wb] = await Promise.all([getAll<AsinLink>('asin_links'), getMeta(), getWbProduct(wb_sku)]);
-  const skuLinks = links.filter((item) => item.wb_sku === wb_sku && item.is_active === 'true' && !item.deleted_at);
+  const [links, meta, wb] = await Promise.all([getAllByIndex<AsinLink>('asin_links', 'wb_sku', wb_sku), getMeta(), getWbProduct(wb_sku)]);
+  const skuLinks = links.map(normalizeLink).filter((item) => item.wb_sku === wb_sku && isActiveLink(item));
   const activeAsinLinked = skuLinks.some((item) => item.asin === meta.active_asin);
   return {
     linked: skuLinks.length > 0,
     activeAsinLinked,
     activeAsin: meta.active_asin,
     seenStatus: wb?.seen_status ?? '',
-    rejected: wb?.rejected === 'true',
-    deferred: wb?.deferred === 'true',
+    rejected: parseBooleanLike(wb?.rejected),
+    deferred: parseBooleanLike(wb?.deferred),
     conflictPotential: Boolean(meta.active_asin) && !activeAsinLinked && skuLinks.length > 0
   };
 }
 
 export async function getCardContext(wb_sku: string, wb_url: string): Promise<CardContext> {
   const state = await getCardState(wb_sku);
-  const links = await getAll<AsinLink>('asin_links');
+  const links = await getAllByIndex<AsinLink>('asin_links', 'wb_sku', wb_sku);
   const wb = await upsertWbProduct(wb_sku, wb_url, {}, state.seenStatus === 'touched' ? 'touched' : 'seen');
-  return { wb_sku, wb_url, seen_status: wb.seen_status, active_asin: state.activeAsin, active_links_count: links.filter((item) => item.wb_sku === wb_sku && item.is_active === 'true' && !item.deleted_at).length, rejected: wb.rejected === 'true', deferred: wb.deferred === 'true' };
+  return { wb_sku, wb_url, seen_status: wb.seen_status, active_asin: state.activeAsin, active_links_count: links.map(normalizeLink).filter((item) => item.wb_sku === wb_sku && isActiveLink(item)).length, rejected: parseBooleanLike(wb.rejected), deferred: parseBooleanLike(wb.deferred) };
 }
 
 export async function exportCsvState(): Promise<Record<string, string>> { const result = await exportStateFiles(); await writeEvent('export', '', (await getMeta()).active_asin, { file_count: Object.keys(result.files).length }); return result.files; }
@@ -264,15 +265,14 @@ export async function getMeta(): Promise<MetaRecord> {
 }
 
 async function getWbProduct(wb_sku: string): Promise<WbProduct | undefined> {
-  const rows = await getAll<WbProduct>('wb_products');
-  return rows.find((item) => item.wb_sku === wb_sku);
+  return await getByKey<WbProduct>('wb_products', wb_sku);
 }
 
 async function upsertWbProduct(wb_sku: string, wb_url: string, updates: Partial<Pick<WbProduct, 'seen_status' | 'rejected' | 'rejected_reason' | 'deferred' | 'deferred_reason'>>, seenFallback: 'seen' | 'touched'): Promise<WbProduct> {
   const current = await getWbProduct(wb_sku);
   const ts = now();
   const seen = updates.seen_status ?? current?.seen_status ?? seenFallback;
-  const next: WbProduct = {
+  const next: WbProduct = normalizeWbProduct({
     wb_sku,
     wb_url: wb_url || current?.wb_url || '',
     seen_status: seen,
@@ -286,7 +286,7 @@ async function upsertWbProduct(wb_sku: string, wb_url: string, updates: Partial<
     created_at: current?.created_at || ts,
     updated_at: ts,
     deleted_at: current?.deleted_at || ''
-  };
+  });
   await putMany('wb_products', [next]);
   return next;
 }

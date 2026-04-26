@@ -1,7 +1,8 @@
 import { parseCsv, toCsv } from '../lib/csv.js';
-import { clearDb, clearStore, getAll, putMany } from '../lib/db.js';
+import { clearDb, clearStore, getAll, getByKey, putMany, runTransaction } from '../lib/db.js';
 import type { AmazonProduct, AsinLink, DebugEntry, EventRecord, GroupMemberRecord, GroupRecord, MetaRecord, WbProduct } from '../lib/types.js';
 import { getMeta } from './actions.js';
+import { booleanToCsvString, isActiveLink, isDeleted, normalizeLink, normalizeWbProduct, parseBooleanLike } from '../lib/normalize.js';
 
 type FileMap = Record<string, string>;
 type StoreKey = 'amazon_products' | 'wb_products' | 'asin_links' | 'groups' | 'group_members' | 'events';
@@ -236,8 +237,11 @@ async function replaceStore(store: 'amazon_products' | 'wb_products' | 'asin_lin
 
 
 export type ValidationResult = {
+  status: 'ok' | 'warning' | 'error';
   validation_warnings: string[];
   validation_errors: string[];
+  validation_info: string[];
+  messages: Array<{ level: 'error' | 'warning' | 'info'; message: string }>;
   duplicate_active_link_count: number;
 };
 
@@ -247,21 +251,31 @@ export async function validateLocalState(): Promise<ValidationResult> {
     getAll<AsinLink>('asin_links'),
     getAll<EventRecord>('events')
   ]);
+  const [metaRows, groups, groupMembers, debugLogs] = await Promise.all([
+    getAll<MetaRecord>('meta'),
+    getAll<GroupRecord>('groups'),
+    getAll<GroupMemberRecord>('group_members'),
+    getAll<DebugEntry>('debug_log')
+  ]);
 
   const warnings: string[] = [];
   const errors: string[] = [];
+  const info: string[] = [];
   const asinSet = new Set(amazon.map((item) => item.asin));
 
   const activeMap = new Map<string, AsinLink[]>();
   for (const link of links) {
     if (!link.link_id || !link.wb_sku || !link.asin) errors.push(`missing required fields in asin_links row: ${link.link_id || 'unknown'}`);
-    if (link.is_active === 'true' && !link.deleted_at) {
+    if (isActiveLink(link)) {
       const key = `${link.wb_sku}::${link.asin}`;
       const bucket = activeMap.get(key) ?? [];
       bucket.push(link);
       activeMap.set(key, bucket);
     }
     if (link.asin && !asinSet.has(link.asin)) warnings.push(`link points to unknown ASIN: ${link.link_id}/${link.asin}`);
+    if (!LINK_TYPES.has(link.link_type)) warnings.push(`invalid link_type for link ${link.link_id}: ${link.link_type}`);
+    if (!['true', 'false', true, false, '', undefined].includes(link.is_active as any)) warnings.push(`invalid boolean-like is_active for link ${link.link_id}`);
+    if (link.created_at && Number.isNaN(Date.parse(link.created_at))) warnings.push(`invalid timestamp created_at in link ${link.link_id}`);
   }
 
   let duplicateCount = 0;
@@ -274,21 +288,38 @@ export async function validateLocalState(): Promise<ValidationResult> {
 
   for (const event of events) {
     if (!event.event_id || !event.event_type || !event.created_at) errors.push(`event missing required fields: ${event.event_id || 'unknown'}`);
+    if (event.created_at && Number.isNaN(Date.parse(event.created_at))) warnings.push(`invalid timestamp created_at in event ${event.event_id || 'unknown'}`);
     if (!event.payload_json) continue;
     try { JSON.parse(event.payload_json); } catch {
       warnings.push(`events payload_json invalid for event_id=${event.event_id || 'unknown'}`);
     }
   }
+  const meta = metaRows[0];
+  if (!meta?.schema_version) warnings.push('meta missing schema_version');
+  if (meta?.active_asin && !asinSet.has(meta.active_asin)) warnings.push(`meta active_asin not found in amazon_products: ${meta.active_asin}`);
+  const groupIds = new Set(groups.filter((g) => !isDeleted(g)).map((g) => g.group_id));
+  for (const member of groupMembers) {
+    if (!isDeleted(member) && member.group_id && !groupIds.has(member.group_id)) warnings.push(`orphan group_member: ${member.member_id}`);
+  }
+  for (const d of debugLogs) {
+    if (!d.debug_log_id) warnings.push(`debug log missing id at ts=${d.ts}`);
+  }
+  info.push(`checked amazon_products=${amazon.length}, asin_links=${links.length}, events=${events.length}`);
 
   await writeDebug('validation_completed', { warnings: warnings.length, errors: errors.length, duplicate_active_link_count: duplicateCount });
-  return { validation_warnings: warnings, validation_errors: errors, duplicate_active_link_count: duplicateCount };
+  const messages = [
+    ...errors.map((message) => ({ level: 'error' as const, message })),
+    ...warnings.map((message) => ({ level: 'warning' as const, message })),
+    ...info.map((message) => ({ level: 'info' as const, message }))
+  ];
+  return { status: errors.length ? 'error' : warnings.length ? 'warning' : 'ok', validation_warnings: warnings, validation_errors: errors, validation_info: info, messages, duplicate_active_link_count: duplicateCount };
 }
 
 export async function repairDuplicateActiveLinks(): Promise<{ repaired_count: number; touched_links: string[] }> {
   const links = await getAll<AsinLink>('asin_links');
   const grouped = new Map<string, AsinLink[]>();
   for (const link of links) {
-    if (link.is_active !== 'true' || link.deleted_at) continue;
+    if (!isActiveLink(link)) continue;
     const key = `${link.wb_sku}::${link.asin}`;
     const bucket = grouped.get(key) ?? [];
     bucket.push(link);
@@ -339,6 +370,74 @@ function defaultMeta(): MetaRecord {
 }
 
 async function writeDebug(action: string, details?: Record<string, unknown>, level: 'info' | 'error' = 'info'): Promise<void> {
-  const entry: DebugEntry = { ts: now(), level, action, details };
-  await putMany('debug_log', [entry]);
+  const entry: DebugEntry = { debug_log_id: `dbg_${crypto.randomUUID()}`, ts: now(), level, action, details };
+  const logs = await getAll<DebugEntry>('debug_log');
+  const next = [...logs, entry].slice(-1000);
+  await clearStore('debug_log');
+  await putMany('debug_log', next.map((x) => ({ ...x, debug_log_id: x.debug_log_id || `dbg_${crypto.randomUUID()}` })));
+}
+
+const LINK_TYPES = new Set(['candidate', 'exact_match', 'similar', 'competitor', 'wrong_size', 'wrong_product']);
+
+type AllInOnePayload = {
+  amazon_products?: AmazonProduct[];
+  wb_products?: WbProduct[];
+  asin_links?: AsinLink[];
+  groups?: GroupRecord[];
+  group_members?: GroupMemberRecord[];
+  events?: EventRecord[];
+  meta?: MetaRecord;
+  debug_logs?: DebugEntry[];
+};
+
+export async function validateAllInOneBackupPayload(payload: unknown): Promise<{ fatalErrors: string[]; warnings: string[]; summary: Record<string, unknown> }> {
+  const obj = (payload && typeof payload === 'object') ? payload as AllInOnePayload : {};
+  const warnings: string[] = [];
+  const fatalErrors: string[] = [];
+  if (!Array.isArray(obj.amazon_products)) fatalErrors.push('amazon_products missing or invalid');
+  if (!Array.isArray(obj.wb_products)) fatalErrors.push('wb_products missing or invalid');
+  if (!Array.isArray(obj.asin_links)) fatalErrors.push('asin_links missing or invalid');
+  if (!Array.isArray(obj.events)) fatalErrors.push('events missing or invalid');
+  if (!obj.meta || typeof obj.meta !== 'object') fatalErrors.push('meta missing or invalid');
+  const asinSet = new Set((obj.amazon_products || []).map((x) => x.asin));
+  for (const link of obj.asin_links || []) {
+    const normalized = normalizeLink(link);
+    if (normalized.asin && !asinSet.has(normalized.asin)) warnings.push(`link points to unknown ASIN: ${normalized.link_id}/${normalized.asin}`);
+  }
+  const summary = {
+    amazon_products: obj.amazon_products?.length || 0,
+    wb_products: obj.wb_products?.length || 0,
+    asin_links: obj.asin_links?.length || 0,
+    groups: obj.groups?.length || 0,
+    group_members: obj.group_members?.length || 0,
+    events: obj.events?.length || 0,
+    debug_logs: obj.debug_logs?.length || 0,
+    active_asin: obj.meta?.active_asin || '',
+    validation_warnings: warnings,
+    validation_errors: fatalErrors
+  };
+  return { fatalErrors, warnings, summary };
+}
+
+export async function restoreFromAllInOneBackup(payload: unknown): Promise<{ restored: boolean; summary: Record<string, unknown> }> {
+  const result = await validateAllInOneBackupPayload(payload);
+  if (result.fatalErrors.length > 0) {
+    return { restored: false, summary: result.summary };
+  }
+  const obj = payload as AllInOnePayload;
+  await runTransaction(['amazon_products', 'wb_products', 'asin_links', 'groups', 'group_members', 'events', 'meta', 'debug_log'], 'readwrite', async (tx) => {
+    const clear = (store: string) => tx.objectStore(store).clear();
+    ['amazon_products', 'wb_products', 'asin_links', 'groups', 'group_members', 'events', 'meta', 'debug_log'].forEach(clear);
+    for (const row of obj.amazon_products || []) tx.objectStore('amazon_products').put(row);
+    for (const row of obj.wb_products || []) tx.objectStore('wb_products').put(normalizeWbProduct(row));
+    for (const row of obj.asin_links || []) tx.objectStore('asin_links').put(normalizeLink(row));
+    for (const row of obj.groups || []) tx.objectStore('groups').put(row);
+    for (const row of obj.group_members || []) tx.objectStore('group_members').put(row);
+    for (const row of obj.events || []) tx.objectStore('events').put(row);
+    tx.objectStore('meta').put({ ...defaultMeta(), ...(obj.meta || {}) });
+    for (const row of obj.debug_logs || []) tx.objectStore('debug_log').put({ ...row, debug_log_id: row.debug_log_id || `dbg_${crypto.randomUUID()}` });
+    tx.objectStore('events').put({ event_id: `evt_${crypto.randomUUID()}`, operation_id: `op_${crypto.randomUUID()}`, event_type: 'restore_completed', wb_sku: '', asin: obj.meta?.active_asin || '', group_id: '', payload_json: JSON.stringify({ source: 'all_in_one_backup' }), created_at: now(), client_id: 'local-extension' });
+    tx.objectStore('debug_log').put({ debug_log_id: `dbg_${crypto.randomUUID()}`, ts: now(), level: 'info', action: 'all_in_one_restore_completed', details: { restored: true } });
+  });
+  return { restored: true, summary: result.summary };
 }

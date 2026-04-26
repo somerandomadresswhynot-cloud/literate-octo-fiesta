@@ -1,7 +1,7 @@
 import { parseCsv } from '../lib/csv.js';
 import { clearStore, getAll, putMany } from '../lib/db.js';
 import { LINK_TYPES, getCardContext, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, recordLinkCopied, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
-import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, validateLocalState } from '../domain/state.js';
+import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, restoreFromAllInOneBackup, validateAllInOneBackupPayload, validateLocalState } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 import { shouldPersistDebug } from '../lib/logging.js';
 
@@ -28,6 +28,8 @@ type Request =
   | { type: 'clearDb' }
   | { type: 'validateLocalState' }
   | { type: 'repairDuplicateActiveLinks' }
+  | { type: 'validateAllInOneBackup'; payload: unknown }
+  | { type: 'restoreAllInOneBackup'; payload: unknown }
   | { type: 'getVerboseLogging' }
   | { type: 'setVerboseLogging'; enabled: boolean }
   | { type: 'getOverlayPosition' }
@@ -209,6 +211,12 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
   if (message.type === 'repairDuplicateActiveLinks') {
     return await repairDuplicateActiveLinks();
   }
+  if (message.type === 'validateAllInOneBackup') {
+    return await validateAllInOneBackupPayload(message.payload);
+  }
+  if (message.type === 'restoreAllInOneBackup') {
+    return await restoreFromAllInOneBackup(message.payload);
+  }
 
   if (message.type === 'getVerboseLogging') {
     const meta = await getMeta();
@@ -259,7 +267,7 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
 
 async function writeDebugEntry(entry: DebugEntry): Promise<void> {
   const logs = await getAll<DebugEntry>('debug_log');
-  const next = [...logs, entry];
+  const next = [...logs, { ...entry, debug_log_id: entry.debug_log_id || `dbg_${crypto.randomUUID()}` }];
   const capped = next.slice(-1000);
   await clearStore('debug_log');
   if (capped.length > 0) {
