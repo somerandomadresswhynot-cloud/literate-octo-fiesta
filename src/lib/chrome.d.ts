@@ -13,7 +13,10 @@ declare const chrome: {
     };
   };
   tabs: {
-    query: (queryInfo: { active?: boolean; currentWindow?: boolean }, callback?: (tabs: Array<{ id?: number }>) => void) => Promise<Array<{ id?: number }>>;
+    query: (queryInfo: { active?: boolean; currentWindow?: boolean }, callback?: (tabs: Array<{ id?: number; url?: string }>) => void) => Promise<Array<{ id?: number; url?: string }>>;
     sendMessage: (tabId: number, message: unknown, callback?: (response?: any) => void) => void;
+  };
+  scripting: {
+    executeScript: (injection: { target: { tabId: number }; files: string[] }, callback?: (results: unknown[]) => void) => void;
   };
 };

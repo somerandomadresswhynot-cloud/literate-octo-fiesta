@@ -2,6 +2,7 @@ import { sendMessage } from '../lib/runtime.js';
 
 const CLASS_NAME = 'wb-amz-overlay';
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
+const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
 
 type ScanStats = {
   linksFound: number;
@@ -12,7 +13,34 @@ type ScanStats = {
   sampleSkus: string[];
 };
 
-void logContent('content_script_loaded', { href: location.href });
+declare global {
+  interface Window {
+    __wbAsinContentBooted?: boolean;
+  }
+}
+
+if (!window[CONTENT_BOOT_FLAG]) {
+  window[CONTENT_BOOT_FLAG] = true;
+  void logContent('content_script_loaded', { url: location.href, ready_state: document.readyState });
+  startContentScript();
+}
+
+function startContentScript(): void {
+  chrome.runtime.onMessage.addListener((message: { type?: string }, _sender, sendResponse) => {
+    if (message.type === 'forceScan') {
+      const stats = scan('popup_force_scan');
+      sendResponse({ ok: true, foundLinks: stats.linksFound, extractedSkus: stats.skuExtracted, injectedOverlays: stats.overlaysInjected });
+      return true;
+    }
+    return false;
+  });
+
+  const observer = new MutationObserver(() => scan('mutation'));
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener('scroll', () => scan('scroll'), { passive: true });
+  setInterval(() => scan('interval'), 3000);
+  scan('initial');
+}
 
 function getVisibleProductAnchors(): HTMLAnchorElement[] {
   const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/catalog/"][href*="detail.aspx"]'));
@@ -99,7 +127,7 @@ async function refreshCardState(sku: string, statusEl: HTMLElement): Promise<voi
   }
 }
 
-function scan(reason = 'auto'): void {
+function scan(reason = 'auto'): ScanStats {
   const stats: ScanStats = {
     linksFound: 0,
     skuExtracted: 0,
@@ -130,19 +158,8 @@ function scan(reason = 'auto'): void {
   void logContent('overlay_injected', { reason, count: stats.overlaysInjected });
   void logContent('card_container_not_found', { reason, count: stats.cardContainerNotFound });
   void logContent('scan_samples', { reason, sample_hrefs: stats.sampleHrefs, sample_skus: stats.sampleSkus });
+  return stats;
 }
-
-chrome.runtime.onMessage.addListener((message: { type?: string }) => {
-  if (message.type === 'forceScan') {
-    scan('popup_force_scan');
-  }
-});
-
-const observer = new MutationObserver(() => scan('mutation'));
-observer.observe(document.documentElement, { childList: true, subtree: true });
-window.addEventListener('scroll', () => scan('scroll'), { passive: true });
-setInterval(() => scan('interval'), 3000);
-scan('initial');
 
 async function logContent(action: string, details: Record<string, unknown>): Promise<void> {
   try {
