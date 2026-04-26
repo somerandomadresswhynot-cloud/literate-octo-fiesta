@@ -6,6 +6,7 @@
     "lib": ["ES2022", "DOM"],
     "strict": true,
     "skipLibCheck": true,
+    "types": [],
     "rootDir": ".",
     "outDir": "dist"
   },
