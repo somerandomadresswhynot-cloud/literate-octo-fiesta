@@ -1,6 +1,6 @@
 import { parseCsv } from '../lib/csv.js';
 import { clearStore, getAll, putMany } from '../lib/db.js';
-import { LINK_TYPES, addWbSkuToGroup, createGroup, getCardContext, getCardState, getGroupsForWbSku, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, linkWbSkuToAsin, listGroups, markCardTouched, markSeenByHover, recordLinkCopied, removeWbSkuFromGroup, searchGroups, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
+import { LINK_TYPES, addWbSkuToGroup, bulkAddToGroup, bulkDefer, bulkLinkToActiveAsin, bulkLinkToSelectedAsin, bulkReject, createGroup, getCardContext, getCardState, getGroupsForWbSku, getHistoryBySku, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, linkWbSkuToAsin, listGroups, markCardTouched, markSeenByHover, recordLinkCopied, removeWbSkuFromGroup, searchGroups, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
 import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, restoreFromAllInOneBackup, validateAllInOneBackupPayload, validateLocalState } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 import { shouldPersistDebug } from '../lib/logging.js';
@@ -29,6 +29,13 @@ type Request =
   | { type: 'removeWbSkuFromGroup'; wb_sku: string; group_id: string }
   | { type: 'getGroupsForWbSku'; wb_sku: string }
   | { type: 'getCardContext'; wb_sku: string; wb_url: string }
+
+  | { type: 'bulkLinkToActiveAsin'; items: Array<{ wb_sku: string; wb_url: string }>; linkType?: string; conflictResolution?: 'skip_conflicts' | 'add_second_link' | 'replace_existing'; rejectedResolution?: 'keep_rejected' | 'clear_rejected' }
+  | { type: 'bulkLinkToSelectedAsin'; items: Array<{ wb_sku: string; wb_url: string }>; asin: string; linkType?: string; conflictResolution?: 'skip_conflicts' | 'add_second_link' | 'replace_existing'; rejectedResolution?: 'keep_rejected' | 'clear_rejected' }
+  | { type: 'bulkAddToGroup'; items: Array<{ wb_sku: string; wb_url: string }>; group_id: string }
+  | { type: 'bulkReject'; items: Array<{ wb_sku: string; wb_url: string }>; reasonCode: string; reasonText: string }
+  | { type: 'bulkDefer'; items: Array<{ wb_sku: string; wb_url: string }>; reasonCode: string; reasonText: string }
+  | { type: 'getHistoryBySku'; wb_sku: string; limit?: number }
   | { type: 'exportState' }
   | { type: 'getExportData' }
   | { type: 'storageSummary' }
@@ -159,6 +166,31 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
 
   if (message.type === 'getCardContext') {
     return { context: await getCardContext(message.wb_sku, message.wb_url) };
+  }
+
+
+  if (message.type === 'bulkLinkToActiveAsin') {
+    return { summary: await bulkLinkToActiveAsin(message.items, (message.linkType as any) || 'candidate', message.conflictResolution || 'skip_conflicts', message.rejectedResolution || 'keep_rejected') };
+  }
+
+  if (message.type === 'bulkLinkToSelectedAsin') {
+    return { summary: await bulkLinkToSelectedAsin(message.items, message.asin, (message.linkType as any) || 'candidate', message.conflictResolution || 'skip_conflicts', message.rejectedResolution || 'keep_rejected') };
+  }
+
+  if (message.type === 'bulkAddToGroup') {
+    return { summary: await bulkAddToGroup(message.items, message.group_id) };
+  }
+
+  if (message.type === 'bulkReject') {
+    return { summary: await bulkReject(message.items, message.reasonCode, message.reasonText) };
+  }
+
+  if (message.type === 'bulkDefer') {
+    return { summary: await bulkDefer(message.items, message.reasonCode, message.reasonText) };
+  }
+
+  if (message.type === 'getHistoryBySku') {
+    return await getHistoryBySku(message.wb_sku, message.limit || 100);
   }
 
   if (message.type === 'exportState') {

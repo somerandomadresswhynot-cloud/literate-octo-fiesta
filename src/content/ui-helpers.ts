@@ -9,3 +9,25 @@ export function mapConflictResolution(decision: 'cancel' | 'add_second_link' | '
   if (decision === 'cancel') return null;
   return decision;
 }
+
+export function buildStatusTooltip(input: { linksCount: number; firstLink?: string; groups?: string[]; rejectedReason?: string; deferredReason?: string; seenStatus?: string }): string {
+  const parts = [`Links: ${input.linksCount}`];
+  if (input.firstLink) parts.push(`First: ${input.firstLink}`);
+  if (input.groups && input.groups.length) parts.push(`Groups: ${input.groups.join(', ')}`);
+  if (input.rejectedReason) parts.push(`Rejected: ${input.rejectedReason}`);
+  if (input.deferredReason) parts.push(`Deferred: ${input.deferredReason}`);
+  if (input.seenStatus) parts.push(`Seen: ${input.seenStatus}`);
+  return parts.join('\n');
+}
+
+export function categorizeBulkConflict(items: Array<{ linksCount: number; linkedToTarget: boolean; linkedToOther: boolean; rejected: boolean; deferred: boolean }>): { noConflict: number; alreadyLinked: number; linkedOther: number; rejected: number; deferred: number; multipleLinks: number } {
+  return items.reduce((acc, item) => {
+    if (item.linksCount === 0) acc.noConflict += 1;
+    if (item.linkedToTarget) acc.alreadyLinked += 1;
+    if (item.linkedToOther) acc.linkedOther += 1;
+    if (item.rejected) acc.rejected += 1;
+    if (item.deferred) acc.deferred += 1;
+    if (item.linksCount > 1) acc.multipleLinks += 1;
+    return acc;
+  }, { noConflict: 0, alreadyLinked: 0, linkedOther: 0, rejected: 0, deferred: 0, multipleLinks: 0 });
+}

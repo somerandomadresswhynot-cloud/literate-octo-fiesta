@@ -414,6 +414,123 @@ async function upsertWbProduct(wb_sku: string, wb_url: string, updates: Partial<
 function asLinkType(value: string): LinkType { return (LINK_TYPES as readonly string[]).includes(value) ? value as LinkType : 'candidate'; }
 function serializeReason(code: string, text: string): string { if (!text.trim()) return code; return `${code}: ${text.trim()}`; }
 
+
+export type BulkConflictResolution = 'skip_conflicts' | 'add_second_link' | 'replace_existing';
+export type BulkSummary = { total: number; succeeded: number; skipped: number; duplicates: number; conflicts: number; errors: number; rejected: number; deferred: number };
+
+function emptyBulkSummary(total: number): BulkSummary { return { total, succeeded: 0, skipped: 0, duplicates: 0, conflicts: 0, errors: 0, rejected: 0, deferred: 0 }; }
+
+async function writeBulkBoundaryEvent(eventType: 'bulk_action_started' | 'bulk_action_completed' | 'bulk_action_failed', action: string, summary: BulkSummary, extra: Record<string, unknown> = {}): Promise<void> {
+  await writeEvent(eventType, '', '', { action, ...summary, ...extra });
+  await log(eventType, { action, ...summary, ...extra }, eventType === 'bulk_action_failed' ? 'error' : 'info');
+}
+
+export async function bulkLinkToSelectedAsin(
+  wbItems: Array<{ wb_sku: string; wb_url: string }>,
+  asin: string,
+  linkType: LinkType,
+  conflictResolution: BulkConflictResolution,
+  rejectedResolution: RejectedResolution = 'keep_rejected'
+): Promise<BulkSummary> {
+  const summary = emptyBulkSummary(wbItems.length);
+  await writeBulkBoundaryEvent('bulk_action_started', 'bulk_link_to_selected_asin', summary, { asin, link_type: linkType, conflictResolution });
+  try {
+    for (const item of wbItems) {
+      try {
+        const result = await linkWbSkuToAsin({
+          wb_sku: item.wb_sku,
+          wb_url: item.wb_url,
+          asin,
+          linkType,
+          createdByAction: 'add_to_asin',
+          conflictResolution: conflictResolution === 'skip_conflicts' ? undefined : (conflictResolution as ConflictResolution),
+          rejectedResolution
+        });
+        const wb = await getWbProduct(item.wb_sku);
+        if (parseBooleanLike(wb?.rejected)) summary.rejected += 1;
+        if (parseBooleanLike(wb?.deferred)) summary.deferred += 1;
+        if (result.status === 'created') summary.succeeded += 1;
+        else if (result.status === 'duplicate_skipped') { summary.skipped += 1; summary.duplicates += 1; }
+        else if (result.status === 'conflict_detected' || result.status === 'rejected_confirmation_required') { summary.skipped += 1; summary.conflicts += 1; }
+        else summary.skipped += 1;
+      } catch {
+        summary.errors += 1;
+      }
+    }
+    await writeBulkBoundaryEvent('bulk_action_completed', 'bulk_link_to_selected_asin', summary, { asin, link_type: linkType, conflictResolution });
+    return summary;
+  } catch (error) {
+    await writeBulkBoundaryEvent('bulk_action_failed', 'bulk_link_to_selected_asin', summary, { asin, error: String(error) });
+    throw error;
+  }
+}
+
+export async function bulkLinkToActiveAsin(
+  wbItems: Array<{ wb_sku: string; wb_url: string }>,
+  linkType: LinkType,
+  conflictResolution: BulkConflictResolution,
+  rejectedResolution: RejectedResolution = 'keep_rejected'
+): Promise<BulkSummary> {
+  const meta = await getMeta();
+  if (!meta.active_asin) throw new Error('No active ASIN selected');
+  return await bulkLinkToSelectedAsin(wbItems, meta.active_asin, linkType, conflictResolution, rejectedResolution);
+}
+
+export async function bulkAddToGroup(wbItems: Array<{ wb_sku: string; wb_url: string }>, group_id: string): Promise<BulkSummary> {
+  const summary = emptyBulkSummary(wbItems.length);
+  await writeBulkBoundaryEvent('bulk_action_started', 'bulk_add_to_group', summary, { group_id });
+  for (const item of wbItems) {
+    try {
+      const res = await addWbSkuToGroup(item.wb_sku, item.wb_url, group_id);
+      if (res.status === 'added') summary.succeeded += 1;
+      else { summary.skipped += 1; summary.duplicates += 1; }
+    } catch {
+      summary.errors += 1;
+    }
+  }
+  await writeBulkBoundaryEvent('bulk_action_completed', 'bulk_add_to_group', summary, { group_id });
+  return summary;
+}
+
+export async function bulkReject(wbItems: Array<{ wb_sku: string; wb_url: string }>, reasonCode: string, reasonText: string): Promise<BulkSummary> {
+  const summary = emptyBulkSummary(wbItems.length);
+  await writeBulkBoundaryEvent('bulk_action_started', 'bulk_reject', summary, { reasonCode });
+  for (const item of wbItems) {
+    try {
+      await setRejected(item.wb_sku, item.wb_url, reasonCode, reasonText);
+      summary.succeeded += 1;
+      summary.rejected += 1;
+    } catch {
+      summary.errors += 1;
+    }
+  }
+  await writeBulkBoundaryEvent('bulk_action_completed', 'bulk_reject', summary, { reasonCode });
+  return summary;
+}
+
+export async function bulkDefer(wbItems: Array<{ wb_sku: string; wb_url: string }>, reasonCode: string, reasonText: string): Promise<BulkSummary> {
+  const summary = emptyBulkSummary(wbItems.length);
+  await writeBulkBoundaryEvent('bulk_action_started', 'bulk_defer', summary, { reasonCode });
+  for (const item of wbItems) {
+    try {
+      await setDeferred(item.wb_sku, item.wb_url, reasonCode, reasonText);
+      summary.succeeded += 1;
+      summary.deferred += 1;
+    } catch {
+      summary.errors += 1;
+    }
+  }
+  await writeBulkBoundaryEvent('bulk_action_completed', 'bulk_defer', summary, { reasonCode });
+  return summary;
+}
+
+export async function getHistoryBySku(wb_sku: string, limit = 100): Promise<{ events: EventRecord[]; hasMore: boolean }> {
+  const events = (await getAllByIndex<EventRecord>('events', 'wb_sku', wb_sku))
+    .filter((evt) => evt.wb_sku === wb_sku)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return { events: events.slice(0, limit), hasMore: events.length > limit };
+}
+
 async function writeEvent(event_type: string, wb_sku: string, asin: string, payload: Record<string, unknown>, group_id = ''): Promise<void> {
   const event: EventRecord = { event_id: uid('evt'), operation_id: uid('op'), event_type, wb_sku, asin, group_id, payload_json: JSON.stringify(payload), created_at: now(), client_id: CLIENT_ID };
   await putMany('events', [event]);

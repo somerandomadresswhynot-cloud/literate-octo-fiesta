@@ -12,7 +12,7 @@ type SearchResult = { asin: string; title: string; brand: string; comment: strin
 
 type OverlayEntry = {
   sku: string; wbUrl: string; linkElement: HTMLAnchorElement; cardElement: HTMLElement; overlayElement: HTMLDivElement;
-  statusElement: HTMLSpanElement; buttonElement: HTMLButtonElement; menuButtonElement: HTMLButtonElement; hoverTimer: number | null;
+  statusElement: HTMLSpanElement; buttonElement: HTMLButtonElement; menuButtonElement: HTMLButtonElement; selectElement: HTMLInputElement; hoverTimer: number | null;
 };
 
 declare global { interface Window { __wbAsinContentBooted?: boolean; } }
@@ -24,7 +24,17 @@ class OverlayManager {
   private readonly dropdownLayer: HTMLDivElement;
   private readonly modalLayer: HTMLDivElement;
   private readonly toastLayer: HTMLDivElement;
+  private readonly panelButton: HTMLButtonElement;
+  private readonly panel: HTMLDivElement;
+  private readonly statsEl: HTMLDivElement;
+  private readonly selectedInfoEl: HTMLDivElement;
+  private readonly bulkActionsEl: HTMLDivElement;
+  private readonly activeAsinEl: HTMLDivElement;
+  private readonly activeAsinSearch: HTMLInputElement;
+  private readonly linkTypeSelect: HTMLSelectElement;
   private readonly overlays = new Map<string, OverlayEntry>();
+  private readonly selectedSkus = new Set<string>();
+  private readonly stateBySku = new Map<string, { linked: boolean; activeAsinLinked: boolean; rejected: boolean; deferred: boolean; groupCount: number; seenStatus: string; conflictPotential: boolean }>();
   private readonly pendingLinks = new Set<string>();
   private activeMenu: HTMLDivElement | null = null;
   private activeModal: HTMLDivElement | null = null;
@@ -40,13 +50,30 @@ class OverlayManager {
     this.dropdownLayer = document.createElement('div'); this.dropdownLayer.className = 'dropdown-layer';
     this.modalLayer = document.createElement('div'); this.modalLayer.className = 'modal-layer';
     this.toastLayer = document.createElement('div'); this.toastLayer.className = 'toast-layer';
+    this.panelButton = document.createElement('button'); this.panelButton.type = 'button'; this.panelButton.className = 'wb-amz-panel-button'; this.panelButton.textContent = 'WB ↔ A';
+    this.panel = document.createElement('div'); this.panel.className = 'wb-amz-panel';
+    this.activeAsinEl = document.createElement('div'); this.activeAsinEl.className = 'active-asin-card';
+    this.activeAsinSearch = document.createElement('input'); this.activeAsinSearch.placeholder = 'Search ASIN';
+    this.linkTypeSelect = document.createElement('select'); LINK_TYPES.forEach((lt) => { const o = document.createElement('option'); o.value = lt; o.textContent = lt; this.linkTypeSelect.appendChild(o); });
+    this.statsEl = document.createElement('div'); this.statsEl.className = 'wb-amz-stats';
+    this.selectedInfoEl = document.createElement('div'); this.selectedInfoEl.className = 'bulk-empty'; this.selectedInfoEl.textContent = 'Bulk actions appear after selecting cards.';
+    this.bulkActionsEl = document.createElement('div'); this.bulkActionsEl.className = 'row';
     this.mountShadow();
   }
 
   async init(): Promise<void> {
     await this.refreshOverlayPositionSetting();
+    await this.refreshPanelContext();
+    this.panelButton.addEventListener('click', () => {
+      const open = this.panel.classList.toggle('open');
+      void logContent(open ? 'panel_opened' : 'panel_closed', {});
+      if (open) void this.updatePageStats();
+    });
+    this.activeAsinSearch.addEventListener('input', () => { void this.searchActiveAsinAndSet(); });
+    this.linkTypeSelect.addEventListener('change', () => { void sendMessage({ type: 'setDefaultLinkType', linkType: this.linkTypeSelect.value }); });
     document.addEventListener('click', () => this.closeMenu());
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeTopLayer(); });
+    setInterval(() => { void this.refreshPanelContext(); }, 3500);
   }
 
   private closeTopLayer(): void {
@@ -69,17 +96,48 @@ class OverlayManager {
     btn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.handleActionTouch(sku, 'link_button').then(() => this.handleLinkClick(sku)); });
     const menuBtn = document.createElement('button'); menuBtn.className = 'wb-amz-menu-btn'; menuBtn.type = 'button'; menuBtn.textContent = '⋯'; menuBtn.setAttribute('aria-label', 'Card actions');
     menuBtn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.openMenu(sku, menuBtn); });
-    overlay.append(status, btn, menuBtn);
+    const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'wb-amz-select';
+    select.addEventListener('change', async () => { await this.handleActionTouch(sku, 'select'); this.toggleSelection(sku, select.checked); });
+    overlay.append(select, status, btn, menuBtn);
     this.layer.appendChild(overlay);
 
-    const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, hoverTimer: null };
+    const entry: OverlayEntry = { sku, wbUrl, linkElement: anchor, cardElement: card, overlayElement: overlay, statusElement: status, buttonElement: btn, menuButtonElement: menuBtn, selectElement: select, hoverTimer: null };
     card.addEventListener('mouseenter', () => {
       if (entry.hoverTimer !== null) return;
       entry.hoverTimer = window.setTimeout(() => { entry.hoverTimer = null; void sendMessage({ type: 'markSeenByHover', wb_sku: sku, wb_url: entry.wbUrl }).then(() => this.refreshCardState(sku, status)).catch(() => {}); }, 1200);
     });
     card.addEventListener('mouseleave', () => { if (entry.hoverTimer !== null) { clearTimeout(entry.hoverTimer); entry.hoverTimer = null; } });
     this.overlays.set(sku, entry);
+    if (this.selectedSkus.has(sku)) select.checked = true;
     void this.refreshCardState(sku, status);
+    void this.updatePageStats();
+  }
+
+  private toggleSelection(sku: string, selected: boolean): void {
+    const entry = this.overlays.get(sku);
+    if (!entry) return;
+    if (selected) this.selectedSkus.add(sku); else this.selectedSkus.delete(sku);
+    entry.overlayElement.classList.toggle('selected', selected);
+    this.selectedInfoEl.textContent = this.selectedSkus.size > 0 ? `Selected: ${this.selectedSkus.size}` : 'Bulk actions appear after selecting cards.';
+    this.bulkActionsEl.style.display = this.selectedSkus.size > 0 ? 'flex' : 'none';
+    void logContent('selection_changed', { selected_count: this.selectedSkus.size });
+    void this.updatePageStats();
+  }
+
+  private selectedItems(): Array<{ wb_sku: string; wb_url: string }> {
+    return Array.from(this.selectedSkus).map((sku) => ({ wb_sku: sku, wb_url: this.overlays.get(sku)?.wbUrl || '' }));
+  }
+
+  private clearSelection(removeSuccessfulOnly = false): void {
+    const toClear = removeSuccessfulOnly ? Array.from(this.selectedSkus) : Array.from(this.overlays.keys());
+    for (const sku of toClear) {
+      if (!this.selectedSkus.has(sku)) continue;
+      this.selectedSkus.delete(sku);
+      const entry = this.overlays.get(sku);
+      if (entry) { entry.selectElement.checked = false; entry.overlayElement.classList.remove('selected'); }
+    }
+    this.bulkActionsEl.style.display = 'none';
+    this.selectedInfoEl.textContent = 'Bulk actions appear after selecting cards.';
   }
 
   private async openMenu(sku: string, trigger: HTMLButtonElement): Promise<void> {
@@ -430,8 +488,24 @@ class OverlayManager {
     const item = (label: string, fn: () => Promise<void>) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); this.closeMenu(); void fn(); }); return b; };
     menu.append(item('Link to active ASIN', async () => this.handleLinkClick(sku)), item('Add to ASIN...', async () => this.addToAsin(sku)), item('Add to group...', async () => this.addToGroup(sku)));
     if (state.groupCount > 0 || entry?.statusElement.textContent === '≡') menu.append(item('Manage groups', async () => this.manageGroups(sku)));
-    menu.append(item('Copy WB URL', async () => this.copyWbUrl(sku)), item('Reject', async () => this.rejectCard(sku)), item('Defer / check later', async () => this.deferCard(sku)), item('Show context', async () => this.showContext(sku)));
+    menu.append(item('Copy WB URL', async () => this.copyWbUrl(sku)), item('Reject', async () => this.rejectCard(sku)), item('Defer / check later', async () => this.deferCard(sku)), item('Show context', async () => this.showContext(sku)), item('Show history', async () => this.showHistory(sku)));
     return menu;
+  }
+
+  private async showHistory(sku: string): Promise<void> {
+    const res = await sendMessage<{ ok: boolean; events: Array<{ created_at: string; event_type: string; payload_json: string }>; hasMore: boolean }>({ type: 'getHistoryBySku', wb_sku: sku, limit: 100 });
+    const body = document.createElement('div'); body.className = 'wb-amz-form';
+    const list = document.createElement('div');
+    for (const evt of res.events) {
+      const row = document.createElement('div');
+      let details = '';
+      try { details = Object.entries(JSON.parse(evt.payload_json || '{}')).slice(0, 3).map(([k, v]) => `${k}:${String(v)}`).join(', '); } catch { details = ''; }
+      row.textContent = `${new Date(evt.created_at).toLocaleString()} — ${evt.event_type}${details ? ` — ${details}` : ''}`;
+      list.appendChild(row);
+    }
+    if (res.hasMore) { const note = document.createElement('div'); note.textContent = 'Showing latest 100 events.'; list.appendChild(note); }
+    body.appendChild(list);
+    this.openModal('Product history', body, [{ label: 'Close', primary: true, onClick: () => this.closeModal() }]);
   }
 
   private async handleActionTouch(sku: string, source: string): Promise<void> { const entry = this.overlays.get(sku); if (!entry) return; await sendMessage({ type: 'markCardTouched', wb_sku: sku, wb_url: entry.wbUrl, source }); }
@@ -446,8 +520,54 @@ class OverlayManager {
                 : state.deferred ? '?'
                   : state.groupCount > 0 ? '≡'
                     : (state.seenStatus === 'seen' || state.seenStatus === 'touched') ? '👁' : '·';
-      statusEl.title = state.groupCount > 0 ? `Groups: ${state.groupPreview.join(', ')}` : '';
+      this.stateBySku.set(sku, state);
+      const ctx = await sendMessage<{ ok: boolean; context: { active_links_count: number; active_links: Array<{ asin: string; link_type: string }>; rejected_reason: string; deferred_reason: string; seen_status: string } }>({ type: 'getCardContext', wb_sku: sku, wb_url: this.overlays.get(sku)?.wbUrl || '' });
+      const titleParts = [
+        `Links: ${ctx.context.active_links_count}`,
+        ctx.context.active_links[0] ? `First: ${ctx.context.active_links[0].asin} (${ctx.context.active_links[0].link_type})` : '',
+        state.groupCount > 0 ? `Groups: ${state.groupPreview.join(', ')}` : '',
+        state.rejected ? `Rejected: ${ctx.context.rejected_reason || '-'}` : '',
+        state.deferred ? `Deferred: ${ctx.context.deferred_reason || '-'}` : '',
+        ctx.context.seen_status ? `Seen: ${ctx.context.seen_status}` : ''
+      ].filter(Boolean);
+      statusEl.title = titleParts.join('\n');
+      await this.updatePageStats();
     } catch { statusEl.textContent = '○'; }
+  }
+
+  private async refreshPanelContext(): Promise<void> {
+    const popup = await sendMessage<{ ok: boolean; activeAsin: string; defaultLinkType: string; amazonCount: number }>({ type: 'getPopupState' });
+    this.linkTypeSelect.value = popup.defaultLinkType || 'candidate';
+    const active = popup.activeAsin ? await sendMessage<{ ok: boolean; results: SearchResult[] }>({ type: 'searchAsin', query: popup.activeAsin }) : { results: [] };
+    const row = active.results[0];
+    this.activeAsinEl.textContent = row ? `${row.asin} — ${row.title || ''} ${row.brand || ''} ${row.comment || ''} ${row.workflow_status || ''}` : 'No active ASIN';
+  }
+
+  private async searchActiveAsinAndSet(): Promise<void> {
+    const q = this.activeAsinSearch.value.trim();
+    if (!q) return;
+    const res = await sendMessage<{ ok: boolean; results: SearchResult[] }>({ type: 'searchAsin', query: q });
+    if (!res.results[0]) return;
+    await sendMessage({ type: 'setActiveAsin', asin: res.results[0].asin });
+    await this.refreshPanelContext();
+    for (const [sku, entry] of this.overlays.entries()) await this.refreshCardState(sku, entry.statusElement);
+  }
+
+  async updatePageStats(): Promise<void> {
+    const rows = Array.from(this.stateBySku.values());
+    const stats = {
+      total: this.overlays.size,
+      unique: this.overlays.size,
+      linkedActive: rows.filter((x) => x.activeAsinLinked).length,
+      linkedOther: rows.filter((x) => !x.activeAsinLinked && x.linked).length,
+      linkedTotal: rows.filter((x) => x.linked).length,
+      groups: rows.filter((x) => x.groupCount > 0).length,
+      rejected: rows.filter((x) => x.rejected).length,
+      deferred: rows.filter((x) => x.deferred).length,
+      seen: rows.filter((x) => x.seenStatus === 'seen' || x.seenStatus === 'touched').length
+    };
+    this.statsEl.textContent = `Cards: ${stats.total} | Unique: ${stats.unique} | Seen: ${stats.seen} | Linked(active): ${stats.linkedActive} | Linked(other): ${stats.linkedOther} | Linked(total): ${stats.linkedTotal} | Groups: ${stats.groups} | Rejected: ${stats.rejected} | Deferred: ${stats.deferred} | Selected: ${this.selectedSkus.size}`;
+    await logContent('page_stats_updated', { ...stats, selected: this.selectedSkus.size });
   }
 
   private updatePositions(reason: string): void {
@@ -481,8 +601,23 @@ class OverlayManager {
   private mountShadow(): void {
     if (this.shadow.querySelector('style')) return;
     const style = document.createElement('style');
-    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-overlay{position:fixed;display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.96);border:1px solid #7a38ff;border-radius:10px;padding:3px 6px;box-shadow:0 2px 6px rgba(30,20,60,.2);pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
-    this.shadow.append(style, this.layer, this.dropdownLayer, this.modalLayer, this.toastLayer);
+    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-overlay{position:fixed;display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.96);border:1px solid #7a38ff;border-radius:10px;padding:3px 6px;box-shadow:0 2px 6px rgba(30,20,60,.2);pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-overlay.selected{outline:2px solid #18a058}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:10px;padding:6px 10px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:340px;max-height:75vh;overflow:auto;background:#fff;border:1px solid #ccbaff;border-radius:10px;padding:10px;display:none;pointer-events:auto;font:12px Arial,sans-serif}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0 0 8px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
+    const header = document.createElement('h3'); header.textContent = 'WB ↔ Amazon';
+    const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => this.panel.classList.remove('open'));
+    const headerRow = document.createElement('div'); headerRow.className = 'row'; headerRow.append(header, close);
+    const asinRow = document.createElement('div'); asinRow.className = 'row'; asinRow.append(this.activeAsinSearch);
+    const setRow = document.createElement('div'); setRow.className = 'row'; setRow.append(this.linkTypeSelect);
+    const mk = (label: string, fn: () => Promise<void> | void) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.addEventListener('click', () => { void fn(); }); return b; };
+    const linkActive = mk('Link to active ASIN', async () => { await logContent('bulk_action_started', { action: 'bulk_link_active', selected: this.selectedSkus.size }); const r = await sendMessage<{ ok: boolean; summary: { succeeded: number; skipped: number } }>({ type: 'bulkLinkToActiveAsin', items: this.selectedItems(), linkType: this.linkTypeSelect.value, conflictResolution: 'skip_conflicts', rejectedResolution: 'keep_rejected' }); this.showToast(`Bulk link: ${r.summary.succeeded} linked, ${r.summary.skipped} skipped`); this.clearSelection(true); });
+    const linkSelected = mk('Link to selected ASIN...', async () => { const q = this.activeAsinSearch.value.trim(); if (!q) return; const results = await sendMessage<{ ok: boolean; results: SearchResult[] }>({ type: 'searchAsin', query: q }); if (!results.results[0]) return; const r = await sendMessage<{ ok: boolean; summary: { succeeded: number; skipped: number } }>({ type: 'bulkLinkToSelectedAsin', items: this.selectedItems(), asin: results.results[0].asin, linkType: this.linkTypeSelect.value, conflictResolution: 'skip_conflicts', rejectedResolution: 'keep_rejected' }); this.showToast(`Bulk link: ${r.summary.succeeded} linked, ${r.summary.skipped} skipped`); this.clearSelection(true); });
+    const addGroup = mk('Add to group...', async () => { const groups = await sendMessage<{ ok: boolean; groups: Array<{ group_id: string; name: string }> }>({ type: 'listGroups' }); if (!groups.groups[0]) return; const r = await sendMessage<{ ok: boolean; summary: { succeeded: number; duplicates: number } }>({ type: 'bulkAddToGroup', items: this.selectedItems(), group_id: groups.groups[0].group_id }); this.showToast(`Added ${r.summary.succeeded} to ${groups.groups[0].name}. Skipped ${r.summary.duplicates}`); this.clearSelection(true); });
+    const reject = mk('Reject', async () => { const r = await sendMessage<{ ok: boolean; summary: { succeeded: number } }>({ type: 'bulkReject', items: this.selectedItems(), reasonCode: 'bad_candidate', reasonText: '' }); this.showToast(`Rejected ${r.summary.succeeded}`); this.clearSelection(true); });
+    const defer = mk('Defer', async () => { const r = await sendMessage<{ ok: boolean; summary: { succeeded: number } }>({ type: 'bulkDefer', items: this.selectedItems(), reasonCode: 'unsure_match', reasonText: '' }); this.showToast(`Deferred ${r.summary.succeeded}`); this.clearSelection(true); });
+    const clear = mk('Clear selection', () => this.clearSelection());
+    this.bulkActionsEl.append(linkActive, linkSelected, addGroup, reject, defer, clear);
+    this.bulkActionsEl.style.display = 'none';
+    this.panel.append(headerRow, asinRow, this.activeAsinEl, setRow, this.statsEl, this.selectedInfoEl, this.bulkActionsEl);
+    this.shadow.append(style, this.layer, this.dropdownLayer, this.modalLayer, this.toastLayer, this.panelButton, this.panel);
   }
 }
 

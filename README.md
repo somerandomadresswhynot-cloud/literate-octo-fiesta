@@ -241,3 +241,22 @@ npm run test
 8. Click Undo (if shown).
 9. Export all-in-one backup.
 10. Restore backup and verify group state remains.
+
+## Manual test: Page Workflow panel + bulk actions v1
+
+1. Import `amazon_products.csv`.
+2. Select active ASIN in popup or in-page panel.
+3. Open Wildberries listing page.
+4. Click floating **WB ↔ A** button.
+5. Confirm panel shows active ASIN card and page stats.
+6. Select 2–3 cards using overlay checkbox.
+7. Run **Link to active ASIN** bulk action.
+8. Export backup and verify links/events.
+9. Select 2 cards.
+10. Run **Add to group...** bulk action.
+11. Confirm `≡` appears.
+12. Select 1–2 cards.
+13. Run bulk **Reject** and bulk **Defer**.
+14. Open card menu and click **Show history**.
+15. Change active ASIN in panel and verify card A/a/A! markers refresh.
+16. Export diagnostic snapshot.

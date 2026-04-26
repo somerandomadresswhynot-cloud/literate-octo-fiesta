@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { filterAndRankAsinResults } from '../src/lib/asinSearch.js';
-import { buildReasonPayload, mapConflictResolution } from '../src/content/ui-helpers.js';
+import { buildReasonPayload, buildStatusTooltip, categorizeBulkConflict, mapConflictResolution } from '../src/content/ui-helpers.js';
 
 describe('ui foundation helpers', () => {
   test('asin ranking defaults keep active first', () => {
@@ -20,5 +20,17 @@ describe('ui foundation helpers', () => {
 
   test('reject/defer payload trims text', () => {
     expect(buildReasonPayload('wrong_product', '  note  ')).toEqual({ reasonCode: 'wrong_product', reasonText: 'note' });
+  });
+
+  test('status tooltip text generation', () => {
+    const tip = buildStatusTooltip({ linksCount: 1, firstLink: 'A1 (candidate)', groups: ['G1'], seenStatus: 'seen' });
+    expect(tip).toContain('Links: 1');
+    expect(tip).toContain('Groups: G1');
+  });
+
+  test('conflict summary categorization', () => {
+    const c = categorizeBulkConflict([{ linksCount: 0, linkedToTarget: false, linkedToOther: false, rejected: false, deferred: false }, { linksCount: 2, linkedToTarget: true, linkedToOther: true, rejected: true, deferred: true }]);
+    expect(c.noConflict).toBe(1);
+    expect(c.multipleLinks).toBe(1);
   });
 });
