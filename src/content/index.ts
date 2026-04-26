@@ -1,5 +1,6 @@
 import { sendMessage } from '../lib/runtime.js';
-import { buildReasonPayload, cardControlsRootStyle, computeAbsoluteControlPlacement, computeFloatingMenuPosition, DEFER_REASONS, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS, toDocumentCoordinates } from './ui-helpers.js';
+import { buildCardMenuSections, buildReasonPayload, buildStatsGrid, cardControlsRootStyle, computeAbsoluteControlPlacement, computeFloatingMenuPosition, DEFER_REASONS, getImageFallbackLabel, mapConflictResolution, normalizeCardControlsCount, REJECT_REASONS, toDocumentCoordinates } from './ui-helpers.js';
+import { toLinkTypeHint, toLinkTypeLabel, toWorkflowStatusLabel } from './ui-labels.js';
 
 const SKU_REGEX = /\/catalog\/(\d+)\/detail\.aspx/i;
 const CONTENT_BOOT_FLAG = '__wbAsinContentBooted';
@@ -9,7 +10,7 @@ const LINK_TYPES = ['candidate', 'exact_match', 'similar', 'competitor', 'wrong_
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
 type CardPlacement = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 type MarkerState = 'A' | 'a' | 'A!' | '·' | '○' | '?' | '×' | '👁' | '!' | '≡';
-type SearchResult = { asin: string; title: string; brand: string; comment: string; workflow_status: string };
+type SearchResult = { asin: string; title: string; brand: string; comment: string; workflow_status: string; image_url?: string };
 type CardControlsSettings = { placement: CardPlacement; offsetX: number; offsetY: number; preferAboveOverlays: boolean };
 
 type OverlayEntry = {
@@ -35,6 +36,7 @@ class OverlayManager {
   private readonly bulkActionsEl: HTMLDivElement;
   private readonly activeAsinEl: HTMLDivElement;
   private readonly activeAsinSearch: HTMLInputElement;
+  private readonly panelSearchResultsEl: HTMLDivElement;
   private readonly linkTypeSelect: HTMLSelectElement;
   private readonly overlays = new Map<string, OverlayEntry>();
   private readonly selectedSkus = new Set<string>();
@@ -60,8 +62,16 @@ class OverlayManager {
     this.panelButton = document.createElement('button'); this.panelButton.type = 'button'; this.panelButton.className = 'wb-amz-panel-button'; this.panelButton.textContent = 'WB ↔ A';
     this.panel = document.createElement('div'); this.panel.className = 'wb-amz-panel';
     this.activeAsinEl = document.createElement('div'); this.activeAsinEl.className = 'active-asin-card';
-    this.activeAsinSearch = document.createElement('input'); this.activeAsinSearch.placeholder = 'Search ASIN';
-    this.linkTypeSelect = document.createElement('select'); LINK_TYPES.forEach((lt) => { const o = document.createElement('option'); o.value = lt; o.textContent = lt; this.linkTypeSelect.appendChild(o); });
+    this.activeAsinSearch = document.createElement('input'); this.activeAsinSearch.placeholder = 'Search ASIN, title, brand…';
+    this.panelSearchResultsEl = document.createElement('div'); this.panelSearchResultsEl.className = 'result-list';
+    this.linkTypeSelect = document.createElement('select');
+    LINK_TYPES.forEach((lt) => {
+      const o = document.createElement('option');
+      o.value = lt;
+      o.textContent = toLinkTypeLabel(lt);
+      o.title = toLinkTypeHint(lt);
+      this.linkTypeSelect.appendChild(o);
+    });
     this.statsEl = document.createElement('div'); this.statsEl.className = 'wb-amz-stats';
     this.selectedInfoEl = document.createElement('div'); this.selectedInfoEl.className = 'bulk-empty'; this.selectedInfoEl.textContent = 'Bulk actions appear after selecting cards.';
     this.bulkActionsEl = document.createElement('div'); this.bulkActionsEl.className = 'row';
@@ -78,7 +88,10 @@ class OverlayManager {
       if (open) void this.updatePageStats();
     });
     this.activeAsinSearch.addEventListener('input', () => { void this.searchActiveAsinAndSet(); });
-    this.linkTypeSelect.addEventListener('change', () => { void sendMessage({ type: 'setDefaultLinkType', linkType: this.linkTypeSelect.value }); });
+    this.linkTypeSelect.addEventListener('change', () => {
+      void sendMessage({ type: 'setDefaultLinkType', linkType: this.linkTypeSelect.value });
+      void logContent('ui_settings_changed', { setting: 'default_link_type', value: this.linkTypeSelect.value });
+    });
     document.addEventListener('click', () => this.closeMenu());
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeTopLayer(); });
     window.addEventListener('scroll', () => this.closeMenu(), { passive: true });
@@ -108,17 +121,17 @@ class OverlayManager {
       for (let i = 1; i < duplicates.length; i += 1) duplicates[i].remove();
     }
     const overlay = duplicate ?? document.createElement('div'); overlay.className = 'wb-amz-overlay wb-asin-card-controls'; overlay.dataset.wbSku = sku;
-    const status = document.createElement('span'); status.className = 'wb-amz-status'; status.textContent = '·';
+    const status = document.createElement('span'); status.className = 'wb-amz-status'; status.textContent = '·'; status.title = 'No status yet';
     status.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
       if (status.textContent === '≡') void this.manageGroups(sku);
     });
-    const btn = document.createElement('button'); btn.className = 'wb-amz-btn'; btn.type = 'button'; btn.textContent = 'A+'; btn.setAttribute('aria-label', `Link WB ${sku} to active ASIN`);
+    const btn = document.createElement('button'); btn.className = 'wb-amz-btn'; btn.type = 'button'; btn.textContent = 'A+'; btn.setAttribute('aria-label', `Link WB ${sku} to active ASIN`); btn.title = 'Add to active ASIN';
     btn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.handleActionTouch(sku, 'link_button').then(() => this.handleLinkClick(sku)); });
-    const menuBtn = document.createElement('button'); menuBtn.className = 'wb-amz-menu-btn'; menuBtn.type = 'button'; menuBtn.textContent = '⋯'; menuBtn.setAttribute('aria-label', 'Card actions');
+    const menuBtn = document.createElement('button'); menuBtn.className = 'wb-amz-menu-btn'; menuBtn.type = 'button'; menuBtn.textContent = '⋯'; menuBtn.setAttribute('aria-label', 'Card actions'); menuBtn.title = 'More actions';
     menuBtn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.openMenu(sku, menuBtn); });
-    const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'wb-amz-select';
+    const select = document.createElement('input'); select.type = 'checkbox'; select.className = 'wb-amz-select'; select.title = 'Select for bulk actions';
     select.addEventListener('change', async () => { await this.handleActionTouch(sku, 'select'); this.toggleSelection(sku, select.checked); });
     if (!duplicate) overlay.append(select, status, btn, menuBtn);
     this.cardControlsRoot.appendChild(overlay);
@@ -435,17 +448,26 @@ class OverlayManager {
   private openAsinSearchDialog(sku: string): Promise<{ asin: string; linkType: string } | null> {
     return new Promise((resolve) => {
       const body = document.createElement('div'); body.className = 'wb-amz-form';
-      const search = document.createElement('input'); search.placeholder = 'Search by asin/title/brand/category/keywords/comment/workflow_status';
-      const select = document.createElement('select'); LINK_TYPES.forEach((lt) => { const o = document.createElement('option'); o.value = lt; o.textContent = lt; select.appendChild(o); });
+      const search = document.createElement('input'); search.placeholder = 'Search ASIN, title, brand…';
+      const select = document.createElement('select'); LINK_TYPES.forEach((lt) => { const o = document.createElement('option'); o.value = lt; o.textContent = toLinkTypeLabel(lt); o.title = toLinkTypeHint(lt); select.appendChild(o); });
       const list = document.createElement('div'); list.className = 'result-list';
       let selectedAsin = '';
       const render = (rows: SearchResult[]) => {
         list.innerHTML = '';
+        if (!rows.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty-state';
+          empty.textContent = 'No ASIN found';
+          list.appendChild(empty);
+          return;
+        }
         rows.forEach((r, idx) => {
           const row = document.createElement('button'); row.type = 'button'; row.className = 'result-row';
-          row.textContent = `${r.asin} — ${r.title || ''} ${r.brand ? `(${r.brand})` : ''} ${r.workflow_status || r.comment || ''}`;
+          row.innerHTML = `<span class="thumb-wrap">${r.image_url ? `<img src="${r.image_url}" alt="">` : `<span class="thumb-fallback">${getImageFallbackLabel(r.asin)}</span>`}</span><span class="result-main"><span class="asin">${r.asin}</span><span class="title">${r.title || '(no title)'}</span><span class="meta">${r.brand || 'Unknown brand'} · ${toWorkflowStatusLabel(r.workflow_status || '')}</span>${r.comment ? `<span class="comment">${r.comment}</span>` : ''}</span><span class="select-tag">Select</span>`;
           row.addEventListener('click', () => { selectedAsin = r.asin; list.querySelectorAll('.result-row').forEach((x) => x.classList.remove('sel')); row.classList.add('sel'); });
           if (idx === 0 && !selectedAsin) { selectedAsin = r.asin; row.classList.add('sel'); }
+          const img = row.querySelector('img');
+          if (img) img.addEventListener('error', () => { img.replaceWith(Object.assign(document.createElement('span'), { className: 'thumb-fallback', textContent: getImageFallbackLabel(r.asin) })); });
           list.appendChild(row);
         });
       };
@@ -455,11 +477,14 @@ class OverlayManager {
         render(res.results);
       };
       search.addEventListener('input', () => { void fetchResults(); });
-      body.append(search, list, select);
       const done = (value: { asin: string; linkType: string } | null) => { this.closeModal(); resolve(value); };
-      this.openModal('Add WB product to ASIN', body, [
+      const skuInfo = document.createElement('div');
+      skuInfo.className = 'muted';
+      skuInfo.textContent = `WB SKU: ${sku}`;
+      body.append(skuInfo, search, list, select);
+      this.openModal('Add product to ASIN', body, [
         { label: 'Cancel', onClick: () => done(null) },
-        { label: 'Add', primary: true, onClick: () => done(selectedAsin ? { asin: selectedAsin, linkType: select.value } : null) }
+        { label: 'Add link', primary: true, onClick: () => done(selectedAsin ? { asin: selectedAsin, linkType: select.value } : null) }
       ]);
       void fetchResults();
     });
@@ -567,13 +592,35 @@ class OverlayManager {
   }
 
   private async buildMenu(sku: string): Promise<HTMLDivElement> {
-    const entry = this.overlays.get(sku);
-    const state = await sendMessage<{ ok: boolean; groupCount: number }>({ type: 'getCardState', wb_sku: sku });
+    const state = await sendMessage<{ ok: boolean; groupCount: number; rejected: boolean; deferred: boolean; linked: boolean }>({ type: 'getCardState', wb_sku: sku });
     const menu = document.createElement('div'); menu.className = 'wb-amz-dropdown';
-    const item = (label: string, fn: () => Promise<void>) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); this.closeMenu(); void fn(); }); return b; };
-    menu.append(item('Link to active ASIN', async () => this.handleLinkClick(sku)), item('Add to ASIN...', async () => this.addToAsin(sku)), item('Add to group...', async () => this.addToGroup(sku)));
-    if (state.groupCount > 0 || entry?.statusElement.textContent === '≡') menu.append(item('Manage groups', async () => this.manageGroups(sku)));
-    menu.append(item('Copy WB URL', async () => this.copyWbUrl(sku)), item('Reject', async () => this.rejectCard(sku)), item('Defer / check later', async () => this.deferCard(sku)), item('Show context', async () => this.showContext(sku)), item('Show history', async () => this.showHistory(sku)));
+    const item = (label: string, fn: () => Promise<void>, icon = '') => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.innerHTML = `<span class="mi">${icon}</span><span>${label}</span>`;
+      b.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); this.closeMenu(); void fn(); });
+      return b;
+    };
+    const divider = () => { const d = document.createElement('div'); d.className = 'menu-divider'; return d; };
+    const tokens = buildCardMenuSections({ rejected: state.rejected, deferred: state.deferred, groupCount: state.groupCount, linked: state.linked });
+    for (const token of tokens) {
+      if (token === 'divider') { menu.append(divider()); continue; }
+      if (token === 'add_active') menu.append(item('Add to active ASIN', async () => this.handleLinkClick(sku), 'A+'));
+      if (token === 'add_asin') menu.append(item('Add to ASIN…', async () => this.addToAsin(sku), '🧩'));
+      if (token === 'add_group') menu.append(item('Add to group…', async () => this.addToGroup(sku), '📁'));
+      if (token === 'manage_groups') menu.append(item('Manage groups', async () => this.manageGroups(sku), '≡'));
+      if (token === 'reject') menu.append(item('Reject', async () => this.rejectCard(sku), '×'));
+      if (token === 'defer') menu.append(item('Defer / check later', async () => this.deferCard(sku), '?'));
+      if (token === 'remove_rejection') menu.append(item('Remove rejection', async () => { this.showToast('Open context/history to adjust status'); await this.showContext(sku); }, '↺'));
+      if (token === 'change_rejection') menu.append(item('Change rejection reason', async () => this.rejectCard(sku), '×'));
+      if (token === 'remove_deferred') menu.append(item('Remove deferred', async () => { this.showToast('Open context/history to adjust status'); await this.showContext(sku); }, '↺'));
+      if (token === 'change_deferred') menu.append(item('Change deferred reason', async () => this.deferCard(sku), '?'));
+      if (token === 'copy_url') menu.append(item('Copy WB URL', async () => this.copyWbUrl(sku), '⧉'));
+      if (token === 'show_links') menu.append(item('Show ASIN links', async () => this.showContext(sku), 'A'));
+      if (token === 'context') menu.append(item('Show context', async () => this.showContext(sku), 'ℹ'));
+      if (token === 'history') menu.append(item('Show history', async () => this.showHistory(sku), '🕘'));
+    }
+    void logContent('ui_menu_rendered', { sku, item_count: menu.querySelectorAll('button').length });
     return menu;
   }
 
@@ -609,7 +656,7 @@ class OverlayManager {
       const ctx = await sendMessage<{ ok: boolean; context: { active_links_count: number; active_links: Array<{ asin: string; link_type: string }>; rejected_reason: string; deferred_reason: string; seen_status: string } }>({ type: 'getCardContext', wb_sku: sku, wb_url: this.overlays.get(sku)?.wbUrl || '' });
       const titleParts = [
         `Links: ${ctx.context.active_links_count}`,
-        ctx.context.active_links[0] ? `First: ${ctx.context.active_links[0].asin} (${ctx.context.active_links[0].link_type})` : '',
+        ctx.context.active_links[0] ? `First: ${ctx.context.active_links[0].asin} (${toLinkTypeLabel(ctx.context.active_links[0].link_type)})` : '',
         state.groupCount > 0 ? `Groups: ${state.groupPreview.join(', ')}` : '',
         state.rejected ? `Rejected: ${ctx.context.rejected_reason || '-'}` : '',
         state.deferred ? `Deferred: ${ctx.context.deferred_reason || '-'}` : '',
@@ -619,7 +666,7 @@ class OverlayManager {
       const entry = this.overlays.get(sku);
       if (entry) this.applyCardControlPosition(entry, 'state_refresh');
       await this.updatePageStats();
-    } catch { statusEl.textContent = '○'; }
+    } catch { statusEl.textContent = '○'; statusEl.title = 'Status unavailable'; }
   }
 
   private async refreshPanelContext(): Promise<void> {
@@ -627,17 +674,32 @@ class OverlayManager {
     this.linkTypeSelect.value = popup.defaultLinkType || 'candidate';
     const active = popup.activeAsin ? await sendMessage<{ ok: boolean; results: SearchResult[] }>({ type: 'searchAsin', query: popup.activeAsin }) : { results: [] };
     const row = active.results[0];
-    this.activeAsinEl.textContent = row ? `${row.asin} — ${row.title || ''} ${row.brand || ''} ${row.comment || ''} ${row.workflow_status || ''}` : 'No active ASIN';
+    this.activeAsinEl.innerHTML = row
+      ? `<div class="asin-card-row"><span class="thumb-wrap">${row.image_url ? `<img src="${row.image_url}" alt="">` : `<span class="thumb-fallback">${getImageFallbackLabel(row.asin)}</span>`}</span><span class="result-main"><span class="asin">${row.asin}</span><span class="title">${row.title || '(no title)'}</span><span class="meta">${row.brand || 'Unknown brand'} · ${toWorkflowStatusLabel(row.workflow_status || '')}</span>${row.comment ? `<span class="comment">${row.comment}</span>` : ''}</span></div>`
+      : '<div class="empty-state">No active ASIN</div>';
   }
 
   private async searchActiveAsinAndSet(): Promise<void> {
     const q = this.activeAsinSearch.value.trim();
-    if (!q) return;
+    if (!q) { this.panelSearchResultsEl.innerHTML = ''; return; }
     const res = await sendMessage<{ ok: boolean; results: SearchResult[] }>({ type: 'searchAsin', query: q });
-    if (!res.results[0]) return;
-    await sendMessage({ type: 'setActiveAsin', asin: res.results[0].asin });
-    await this.refreshPanelContext();
-    for (const [sku, entry] of this.overlays.entries()) await this.refreshCardState(sku, entry.statusElement);
+    this.panelSearchResultsEl.innerHTML = '';
+    if (!res.results[0]) { this.panelSearchResultsEl.innerHTML = '<div class=\"empty-state\">No ASIN found</div>'; return; }
+    for (const row of res.results.slice(0, 10)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'result-row';
+      btn.innerHTML = `<span class="thumb-wrap">${row.image_url ? `<img src="${row.image_url}" alt="">` : `<span class="thumb-fallback">${getImageFallbackLabel(row.asin)}</span>`}</span><span class="result-main"><span class="asin">${row.asin}</span><span class="title">${row.title || '(no title)'}</span><span class="meta">${row.brand || 'Unknown brand'} · ${toWorkflowStatusLabel(row.workflow_status || '')}</span></span><span class="select-tag">Set active</span>`;
+      btn.addEventListener('click', async () => {
+        await sendMessage({ type: 'setActiveAsin', asin: row.asin });
+        await logContent('ui_asin_result_selected', { asin: row.asin, source: 'panel' });
+        this.activeAsinSearch.value = '';
+        this.panelSearchResultsEl.innerHTML = '';
+        await this.refreshPanelContext();
+        for (const [sku, entry] of this.overlays.entries()) await this.refreshCardState(sku, entry.statusElement);
+      });
+      this.panelSearchResultsEl.appendChild(btn);
+    }
   }
 
   async updatePageStats(): Promise<void> {
@@ -653,7 +715,8 @@ class OverlayManager {
       deferred: rows.filter((x) => x.deferred).length,
       seen: rows.filter((x) => x.seenStatus === 'seen' || x.seenStatus === 'touched').length
     };
-    this.statsEl.textContent = `Cards: ${stats.total} | Unique: ${stats.unique} | Seen: ${stats.seen} | Linked(active): ${stats.linkedActive} | Linked(other): ${stats.linkedOther} | Linked(total): ${stats.linkedTotal} | Groups: ${stats.groups} | Rejected: ${stats.rejected} | Deferred: ${stats.deferred} | Selected: ${this.selectedSkus.size}`;
+    const chips = buildStatsGrid({ total: stats.total, seen: stats.seen, linkedActive: stats.linkedActive, linkedTotal: stats.linkedTotal, groups: stats.groups, rejected: stats.rejected, deferred: stats.deferred, selected: this.selectedSkus.size });
+    this.statsEl.innerHTML = chips.map((chip) => `<span class="stat-chip" title="${chip.tip}"><b>${chip.value}</b> ${chip.label}</span>`).join('');
     await logContent('page_stats_updated', { ...stats, selected: this.selectedSkus.size });
   }
 
@@ -704,12 +767,15 @@ class OverlayManager {
   private mountShadow(): void {
     if (this.shadow.querySelector('style')) return;
     const style = document.createElement('style');
-    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:10px;padding:6px 10px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:340px;max-height:75vh;overflow:auto;background:#fff;border:1px solid #ccbaff;border-radius:10px;padding:10px;display:none;pointer-events:auto;font:12px Arial,sans-serif}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0 0 8px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:4px 7px;cursor:pointer}.wb-amz-menu-btn{padding:4px 6px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:180px;background:#fff;border:1px solid #c8b7ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;flex-direction:column;pointer-events:auto}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(500px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #ccbaff;border-radius:8px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:8px}.result-row{display:block;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px}.result-row.sel,.result-row:hover{background:#f4efff}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
+    style.textContent = `.overlay-layer,.dropdown-layer,.modal-layer{position:fixed;inset:0;pointer-events:none}.wb-amz-panel-button{position:fixed;right:12px;top:12px;z-index:2;border:1px solid #5f20d4;color:#fff;background:#7a38ff;border-radius:999px;padding:6px 12px;font-weight:700;pointer-events:auto}.wb-amz-panel{position:fixed;right:12px;top:50px;width:360px;max-height:78vh;overflow:auto;background:#fff;border:1px solid #dccdff;border-radius:12px;padding:10px;display:none;pointer-events:auto;font:12px/1.3 Arial,sans-serif;box-shadow:0 10px 26px rgba(36,20,76,.2)}.wb-amz-panel.open{display:block}.wb-amz-panel h3{margin:0;font-size:13px}.wb-amz-panel .row{display:flex;gap:6px;align-items:center;margin:6px 0}.section-title{font-size:11px;color:#5d5572;text-transform:uppercase;letter-spacing:.03em;margin:8px 0 4px}.muted{font-size:11px;color:#6c6483}.wb-amz-btn,.wb-amz-menu-btn,.wb-amz-modal button,.wb-amz-dropdown button,.wb-amz-panel button{border:1px solid #5f20d4;color:#fff;background:#7a38ff;font-size:12px;font-weight:700;line-height:1;border-radius:8px;padding:5px 8px;cursor:pointer}.wb-amz-panel button.secondary,.wb-amz-modal button{background:#fff;color:#47258d;border-color:#ccbaff}.wb-amz-menu-btn{padding:4px 7px}.wb-amz-status{color:#5f20d4;font-size:12px;font-weight:700;min-width:12px;text-align:center}.wb-amz-select{margin:0}.wb-amz-dropdown{position:fixed;min-width:230px;background:#fff;border:1px solid #d7c9ff;border-radius:10px;box-shadow:0 10px 26px rgba(0,0,0,.18);display:flex;flex-direction:column;pointer-events:auto;padding:5px}.wb-amz-dropdown button{border:none;background:#fff;color:#221;padding:8px 10px;text-align:left;display:flex;gap:8px;align-items:center}.wb-amz-dropdown .mi{opacity:.7;min-width:16px}.menu-divider{height:1px;background:#ece4ff;margin:4px 2px}.wb-amz-dropdown button:hover{background:#f5f0ff}.wb-amz-modal-backdrop{position:fixed;inset:0;background:rgba(20,12,36,.42);pointer-events:auto}.wb-amz-modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(560px,95vw);max-height:85vh;overflow:auto;background:#fff;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;pointer-events:auto;font-family:Arial,sans-serif}.wb-amz-modal h3{margin:0;font-size:14px}.wb-amz-modal-actions{display:flex;justify-content:flex-end;gap:8px}.wb-amz-modal-actions .primary{background:#5f20d4;color:#fff}.wb-amz-form{display:flex;flex-direction:column;gap:8px;font-size:12px}.wb-amz-form input,.wb-amz-form textarea,.wb-amz-form select,.wb-amz-panel input,.wb-amz-panel select{border:1px solid #d8ccff;border-radius:9px;padding:8px;font-size:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chips button{background:#f5f0ff;color:#3f2679;border:1px solid #d9cbff}.chips button.sel{background:#7a38ff;color:#fff}.result-list{max-height:220px;overflow:auto;border:1px solid #ece4ff;border-radius:10px}.result-row{display:flex;width:100%;text-align:left;border:none;background:#fff;color:#222;padding:8px;font-size:12px;gap:8px;align-items:flex-start}.result-row.sel,.result-row:hover{background:#f4efff}.result-main{display:flex;flex-direction:column;min-width:0;gap:2px}.result-main .asin{font-weight:700;color:#34235f}.result-main .title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.result-main .meta{color:#615a74;font-size:11px}.result-main .comment{color:#615a74;font-size:11px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.thumb-wrap{width:36px;height:36px;border-radius:8px;background:#f1eefb;display:inline-flex;align-items:center;justify-content:center;overflow:hidden;flex:0 0 36px}.thumb-wrap img{width:100%;height:100%;object-fit:cover}.thumb-fallback{font-weight:700;color:#645789;font-size:11px}.select-tag{margin-left:auto;color:#6b35e5;font-weight:700;font-size:11px;white-space:nowrap;align-self:center}.asin-card-row{display:flex;gap:8px;padding:6px;border:1px solid #ece4ff;border-radius:10px;background:#fcfaff}.stat-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 7px;border:1px solid #e8dfff;border-radius:999px;background:#fbf9ff;font-size:11px;margin:2px}.empty-state{padding:10px;color:#6c6483;font-size:12px}.toast-layer{position:fixed;right:12px;bottom:12px;display:flex;flex-direction:column;gap:8px;pointer-events:none}.wb-amz-toast{pointer-events:auto;background:#1f1437;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;display:inline-flex;gap:8px;align-items:center}.wb-amz-toast button{border:1px solid #fff;background:transparent;color:#fff;border-radius:6px;padding:2px 6px;cursor:pointer}`;
     this.ensureCardDomStyle();
     const header = document.createElement('h3'); header.textContent = 'WB ↔ Amazon';
-    const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => this.panel.classList.remove('open'));
-    const headerRow = document.createElement('div'); headerRow.className = 'row'; headerRow.append(header, close);
+    const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.className = 'secondary'; close.addEventListener('click', () => this.panel.classList.remove('open'));
+    const dot = document.createElement('span'); dot.textContent = '●'; dot.style.color = '#7a38ff';
+    const headerRow = document.createElement('div'); headerRow.className = 'row'; headerRow.append(header, dot, close);
+    const activeTitle = document.createElement('div'); activeTitle.className = 'section-title'; activeTitle.textContent = 'Active ASIN';
     const asinRow = document.createElement('div'); asinRow.className = 'row'; asinRow.append(this.activeAsinSearch);
+    const settingsTitle = document.createElement('div'); settingsTitle.className = 'section-title'; settingsTitle.textContent = 'Quick settings';
     const setRow = document.createElement('div'); setRow.className = 'row'; setRow.append(this.linkTypeSelect);
     const mk = (label: string, fn: () => Promise<void> | void) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.addEventListener('click', () => { void fn(); }); return b; };
     const linkActive = mk('Link to active ASIN', async () => { await logContent('bulk_action_started', { action: 'bulk_link_active', selected: this.selectedSkus.size }); const r = await sendMessage<{ ok: boolean; summary: { succeeded: number; skipped: number } }>({ type: 'bulkLinkToActiveAsin', items: this.selectedItems(), linkType: this.linkTypeSelect.value, conflictResolution: 'skip_conflicts', rejectedResolution: 'keep_rejected' }); this.showToast(`Bulk link: ${r.summary.succeeded} linked, ${r.summary.skipped} skipped`); this.clearSelection(true); });
@@ -720,7 +786,10 @@ class OverlayManager {
     const clear = mk('Clear selection', () => this.clearSelection());
     this.bulkActionsEl.append(linkActive, linkSelected, addGroup, reject, defer, clear);
     this.bulkActionsEl.style.display = 'none';
-    this.panel.append(headerRow, asinRow, this.activeAsinEl, setRow, this.statsEl, this.selectedInfoEl, this.bulkActionsEl);
+    const statsTitle = document.createElement('div'); statsTitle.className = 'section-title'; statsTitle.textContent = 'Stats';
+    const bulkTitle = document.createElement('div'); bulkTitle.className = 'section-title'; bulkTitle.textContent = 'Bulk actions';
+    this.panel.append(headerRow, activeTitle, asinRow, this.panelSearchResultsEl, this.activeAsinEl, settingsTitle, setRow, statsTitle, this.statsEl, bulkTitle, this.selectedInfoEl, this.bulkActionsEl);
+    void logContent('ui_panel_rendered', {});
     this.shadow.append(style, this.layer, this.dropdownLayer, this.modalLayer, this.toastLayer, this.panelButton, this.panel);
   }
   private ensureCardDomStyle(): void {

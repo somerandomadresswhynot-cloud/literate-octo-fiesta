@@ -258,6 +258,21 @@ npm run test
 
 ## Manual test: Page Workflow panel + bulk actions v1
 
+## Manual test: UX polish panel/menu pass
+
+1. Open WB.
+2. Open floating panel.
+3. Confirm active ASIN card is readable.
+4. Search ASIN by title/brand.
+5. Change default link type and confirm friendly labels.
+6. Hover stats chips and status markers.
+7. Open ⋯ card menu.
+8. Confirm actions are grouped and clear.
+9. Open Add to ASIN and confirm visual result cards.
+10. Open Add to group and confirm group cards.
+11. Open context/history dialogs.
+12. Confirm no browser prompt/alert/confirm appears in normal flows.
+
 1. Import `amazon_products.csv`.
 2. Select active ASIN in popup or in-page panel.
 3. Open Wildberries listing page.
