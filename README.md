@@ -200,3 +200,19 @@ npm run test
 7. Export and verify two active links for the SKU.
 8. Try another SKU and choose replace existing link.
 9. Export and verify previous link is inactive (`is_active=false`, `deleted_at` filled).
+
+## Manual test: UI Foundation PR (dialogs/popovers)
+
+1. Open WB page.
+2. Open ⋯ menu.
+3. Copy WB URL.
+4. Reject product using custom dialog.
+5. Undo reject from toast.
+6. Defer product using custom dialog.
+7. Undo defer from toast.
+8. Add product to non-active ASIN using custom ASIN search dialog.
+9. Trigger conflict by linking same SKU to another ASIN.
+10. Resolve conflict with Add second link.
+11. Repeat conflict and use Replace existing links.
+12. Show context dialog.
+13. Export all-in-one backup and verify events/links changed.

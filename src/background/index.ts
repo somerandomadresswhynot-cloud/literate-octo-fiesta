@@ -4,6 +4,7 @@ import { LINK_TYPES, getCardContext, getCardState, getMeta, importAmazonProducts
 import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, restoreFromAllInOneBackup, validateAllInOneBackupPayload, validateLocalState } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 import { shouldPersistDebug } from '../lib/logging.js';
+import { filterAndRankAsinResults } from '../lib/asinSearch.js';
 
 type Request =
   | { type: 'importAmazonCsv'; csvText: string }
@@ -43,21 +44,12 @@ export async function performAsinSearch(query: string): Promise<{ results: Amazo
     getMeta(),
     getAll('events')
   ]);
-  const q = query.toLowerCase().trim();
-  const matches = products.filter((product) => {
-    if (!q) return true;
-    return [product.asin, product.title, product.brand, product.category, product.keywords, product.comment, product.workflow_status].some((field) => field?.toLowerCase().includes(q));
-  });
   const recentAsins = (events as Array<{ event_type: string; asin: string }>).filter((x) => x.event_type === 'active_asin_changed' && x.asin).map((x) => x.asin);
-  const recentOrder = Array.from(new Set(recentAsins.reverse()));
-  const rank = (asin: string, workflowStatus: string): number => {
-    if (!q && meta.active_asin && asin === meta.active_asin) return 0;
-    const recentIdx = recentOrder.indexOf(asin);
-    if (!q && recentIdx >= 0) return 1 + recentIdx;
-    if (!q && workflowStatus === 'in_progress') return 100;
-    return 1000;
+  return {
+    results: filterAndRankAsinResults({ products, query, activeAsin: meta.active_asin, recentAsins }),
+    activeAsin: meta.active_asin,
+    linkTypes: LINK_TYPES
   };
-  return { results: matches.sort((a, b) => rank(a.asin, a.workflow_status) - rank(b.asin, b.workflow_status)).slice(0, 50), activeAsin: meta.active_asin, linkTypes: LINK_TYPES };
 }
 
 chrome.runtime.onMessage.addListener((message: Request, _sender: unknown, sendResponse: (response: unknown) => void) => {
