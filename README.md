@@ -68,6 +68,18 @@ wb_sku,wb_url,seen_status,first_seen_at,last_seen_at,last_touched_at,rejected,re
 link_id,wb_sku,asin,link_type,is_active,comment,created_at,updated_at,deleted_at,created_by_action
 ```
 
+`groups.csv`
+
+```csv
+group_id,name,icon,comment,group_type,created_at,updated_at,deleted_at
+```
+
+`group_members.csv`
+
+```csv
+membership_id,group_id,wb_sku,wb_url,created_at,updated_at,deleted_at
+```
+
 `events.csv`
 
 ```csv
@@ -216,3 +228,16 @@ npm run test
 11. Repeat conflict and use Replace existing links.
 12. Show context dialog.
 13. Export all-in-one backup and verify events/links changed.
+
+## Manual test: Groups v1
+
+1. Open WB.
+2. Open `⋯` on a card.
+3. Click **Add to group...**.
+4. Create group `Проверить позже`.
+5. Confirm card shows `≡`.
+6. Open **Manage groups**.
+7. Remove from group.
+8. Click Undo (if shown).
+9. Export all-in-one backup.
+10. Restore backup and verify group state remains.

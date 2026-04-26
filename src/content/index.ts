@@ -7,7 +7,7 @@ const ROOT_ID = 'wb-asin-overlay-root';
 const LINK_TYPES = ['candidate', 'exact_match', 'similar', 'competitor', 'wrong_size', 'wrong_product'] as const;
 
 type OverlayPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
-type MarkerState = 'A' | 'a' | 'A!' | '·' | '○' | '?' | '×' | '👁' | '!';
+type MarkerState = 'A' | 'a' | 'A!' | '·' | '○' | '?' | '×' | '👁' | '!' | '≡';
 type SearchResult = { asin: string; title: string; brand: string; comment: string; workflow_status: string };
 
 type OverlayEntry = {
@@ -60,10 +60,15 @@ class OverlayManager {
     if (existing) { existing.linkElement = anchor; existing.cardElement = card; existing.wbUrl = wbUrl; return; }
     const overlay = document.createElement('div'); overlay.className = 'wb-amz-overlay'; overlay.dataset.wbSku = sku;
     const status = document.createElement('span'); status.className = 'wb-amz-status'; status.textContent = '·';
+    status.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (status.textContent === '≡') void this.manageGroups(sku);
+    });
     const btn = document.createElement('button'); btn.className = 'wb-amz-btn'; btn.type = 'button'; btn.textContent = 'A+'; btn.setAttribute('aria-label', `Link WB ${sku} to active ASIN`);
     btn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.handleActionTouch(sku, 'link_button').then(() => this.handleLinkClick(sku)); });
     const menuBtn = document.createElement('button'); menuBtn.className = 'wb-amz-menu-btn'; menuBtn.type = 'button'; menuBtn.textContent = '⋯'; menuBtn.setAttribute('aria-label', 'Card actions');
-    menuBtn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); this.openMenu(sku, menuBtn); });
+    menuBtn.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void this.openMenu(sku, menuBtn); });
     overlay.append(status, btn, menuBtn);
     this.layer.appendChild(overlay);
 
@@ -77,9 +82,9 @@ class OverlayManager {
     void this.refreshCardState(sku, status);
   }
 
-  private openMenu(sku: string, trigger: HTMLButtonElement): void {
+  private async openMenu(sku: string, trigger: HTMLButtonElement): Promise<void> {
     this.closeModal(); this.closeMenu();
-    const menu = this.buildMenu(sku);
+    const menu = await this.buildMenu(sku);
     const rect = trigger.getBoundingClientRect();
     menu.style.left = `${Math.max(8, rect.left)}px`; menu.style.top = `${rect.bottom + 4}px`;
     this.dropdownLayer.appendChild(menu); this.activeMenu = menu;
@@ -122,7 +127,7 @@ class OverlayManager {
   async refreshOverlayPositionSetting(): Promise<void> { try { const response = await sendMessage<{ ok: boolean; position: OverlayPosition }>({ type: 'getOverlayPosition' }); if (response.position) this.overlayPosition = response.position; } catch { this.overlayPosition = 'top-left'; } }
   schedulePositionUpdate(reason: string): void { if (this.updateQueued) return; this.updateQueued = true; requestAnimationFrame(() => { this.updateQueued = false; this.updatePositions(reason); }); }
 
-  private showToast(message: string, undoType?: 'link_created' | 'rejected_set' | 'deferred_set'): void {
+  private showToast(message: string, undoType?: 'link_created' | 'rejected_set' | 'deferred_set' | 'group_added' | 'group_removed'): void {
     const toast = document.createElement('div'); toast.className = 'wb-amz-toast';
     const text = document.createElement('span'); text.textContent = message; toast.appendChild(text);
     if (undoType) {
@@ -183,6 +188,47 @@ class OverlayManager {
     await logContent('ui_add_to_asin_selected', { sku, asin: result.asin, link_type: result.linkType });
     await this.linkWithFlow({ sku, wbUrl: entry.wbUrl, asin: result.asin, linkType: result.linkType, useActiveAsin: false, source: 'menu' });
     await this.refreshCardState(sku, entry.statusElement);
+  }
+
+  private async addToGroup(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku); if (!entry) return;
+    await logContent('group_dialog_opened', { sku });
+    await this.openGroupSearchDialog(sku, entry.wbUrl);
+    await this.refreshCardState(sku, entry.statusElement);
+  }
+
+  private async manageGroups(sku: string): Promise<void> {
+    const entry = this.overlays.get(sku); if (!entry) return;
+    const groupsRes = await sendMessage<{ ok: boolean; groups: Array<{ group_id: string; name: string; icon: string; comment: string }> }>({ type: 'getGroupsForWbSku', wb_sku: sku });
+    await logContent('group_dialog_opened', { sku, mode: 'manage' });
+    await new Promise<void>((resolve) => {
+      const body = document.createElement('div'); body.className = 'wb-amz-form';
+      const list = document.createElement('div'); list.className = 'result-list';
+      const render = () => {
+        list.innerHTML = '';
+        for (const group of groupsRes.groups) {
+          const row = document.createElement('div'); row.className = 'result-row';
+          row.textContent = `${group.icon || '≡'} ${group.name}${group.comment ? ` — ${group.comment}` : ''}`;
+          const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
+          remove.addEventListener('click', async () => {
+            await sendMessage({ type: 'removeWbSkuFromGroup', wb_sku: sku, group_id: group.group_id });
+            this.showToast('Removed from group', 'group_removed');
+            await this.refreshCardState(sku, entry.statusElement);
+            this.closeModal();
+            resolve();
+          });
+          row.appendChild(remove);
+          list.appendChild(row);
+        }
+      };
+      render();
+      body.append(list);
+      this.openModal('Manage groups', body, [
+        { label: 'Add to group', onClick: () => { this.closeModal(); void this.addToGroup(sku).then(() => resolve()); } },
+        { label: 'Create group', onClick: () => { this.closeModal(); void this.openCreateGroupDialog(sku, entry.wbUrl).then(() => resolve()); } },
+        { label: 'Close', primary: true, onClick: () => { this.closeModal(); resolve(); } }
+      ]);
+    });
   }
 
   private async copyWbUrl(sku: string): Promise<void> {
@@ -301,18 +347,106 @@ class OverlayManager {
     });
   }
 
-  private buildMenu(sku: string): HTMLDivElement {
+  private openCreateGroupDialog(sku: string, wbUrl: string): Promise<void> {
+    return new Promise((resolve) => {
+      const body = document.createElement('div'); body.className = 'wb-amz-form';
+      const name = document.createElement('input'); name.placeholder = 'Name (required)';
+      const icon = document.createElement('input'); icon.placeholder = 'Icon (optional)';
+      const comment = document.createElement('input'); comment.placeholder = 'Comment (optional)';
+      const groupType = document.createElement('input'); groupType.placeholder = 'Group type (optional)';
+      body.append(name, icon, comment, groupType);
+      const done = () => { this.closeModal(); resolve(); };
+      this.openModal('Create group', body, [
+        { label: 'Cancel', onClick: done },
+        {
+          label: 'Create',
+          onClick: async () => {
+            if (!name.value.trim()) return;
+            await sendMessage({ type: 'createGroup', name: name.value.trim(), icon: icon.value.trim(), comment: comment.value.trim(), group_type: groupType.value.trim() });
+            this.showToast('Group created');
+            done();
+          }
+        },
+        {
+          label: 'Create and add product',
+          primary: true,
+          onClick: async () => {
+            if (!name.value.trim()) return;
+            const created = await sendMessage<{ ok: boolean; group: { group_id: string } }>({ type: 'createGroup', name: name.value.trim(), icon: icon.value.trim(), comment: comment.value.trim(), group_type: groupType.value.trim() });
+            await sendMessage({ type: 'addWbSkuToGroup', wb_sku: sku, wb_url: wbUrl, group_id: created.group.group_id });
+            this.showToast('Added to group', 'group_added');
+            done();
+          }
+        }
+      ]);
+    });
+  }
+
+  private openGroupSearchDialog(sku: string, wbUrl: string): Promise<void> {
+    return new Promise((resolve) => {
+      const body = document.createElement('div'); body.className = 'wb-amz-form';
+      const search = document.createElement('input'); search.placeholder = 'Search groups';
+      const list = document.createElement('div'); list.className = 'result-list';
+      body.append(search, list);
+      const load = async () => {
+        const query = search.value.trim();
+        await logContent('group_search_query', { sku, query });
+        const reqType = query ? 'searchGroups' : 'listGroups';
+        const groupsRes = await sendMessage<{ ok: boolean; groups: Array<{ group_id: string; name: string; icon: string; comment: string; product_count: number }> }>({ type: reqType as any, query });
+        const current = await sendMessage<{ ok: boolean; groups: Array<{ group_id: string }> }>({ type: 'getGroupsForWbSku', wb_sku: sku });
+        const inGroup = new Set(current.groups.map((g) => g.group_id));
+        list.innerHTML = '';
+        for (const group of groupsRes.groups) {
+          const row = document.createElement('div'); row.className = 'result-row';
+          const already = inGroup.has(group.group_id);
+          row.textContent = `${group.icon || '≡'} ${group.name}${group.comment ? ` — ${group.comment}` : ''} (${group.product_count ?? 0})`;
+          const addBtn = document.createElement('button'); addBtn.type = 'button'; addBtn.textContent = already ? 'In group' : 'Add';
+          addBtn.disabled = already;
+          addBtn.addEventListener('click', async () => {
+            const res = await sendMessage<{ ok: boolean; status?: string }>({ type: 'addWbSkuToGroup', wb_sku: sku, wb_url: wbUrl, group_id: group.group_id });
+            if (res.status === 'already_in_group') this.showToast('Already in group');
+            else this.showToast('Added to group', 'group_added');
+            this.closeModal();
+            resolve();
+          });
+          row.appendChild(addBtn);
+          list.appendChild(row);
+        }
+      };
+      search.addEventListener('input', () => { void load(); });
+      this.openModal('Add product to group', body, [
+        { label: 'Close', onClick: () => { this.closeModal(); resolve(); } },
+        { label: '+ Create new group', onClick: () => { this.closeModal(); void this.openCreateGroupDialog(sku, wbUrl).then(resolve); } }
+      ]);
+      void logContent('group_search_opened', { sku });
+      void load();
+    });
+  }
+
+  private async buildMenu(sku: string): Promise<HTMLDivElement> {
+    const entry = this.overlays.get(sku);
+    const state = await sendMessage<{ ok: boolean; groupCount: number }>({ type: 'getCardState', wb_sku: sku });
     const menu = document.createElement('div'); menu.className = 'wb-amz-dropdown';
     const item = (label: string, fn: () => Promise<void>) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); this.closeMenu(); void fn(); }); return b; };
-    menu.append(item('Link to active ASIN', async () => this.handleLinkClick(sku)), item('Add to ASIN...', async () => this.addToAsin(sku)), item('Copy WB URL', async () => this.copyWbUrl(sku)), item('Reject', async () => this.rejectCard(sku)), item('Defer / check later', async () => this.deferCard(sku)), item('Show context', async () => this.showContext(sku)));
+    menu.append(item('Link to active ASIN', async () => this.handleLinkClick(sku)), item('Add to ASIN...', async () => this.addToAsin(sku)), item('Add to group...', async () => this.addToGroup(sku)));
+    if (state.groupCount > 0 || entry?.statusElement.textContent === '≡') menu.append(item('Manage groups', async () => this.manageGroups(sku)));
+    menu.append(item('Copy WB URL', async () => this.copyWbUrl(sku)), item('Reject', async () => this.rejectCard(sku)), item('Defer / check later', async () => this.deferCard(sku)), item('Show context', async () => this.showContext(sku)));
     return menu;
   }
 
   private async handleActionTouch(sku: string, source: string): Promise<void> { const entry = this.overlays.get(sku); if (!entry) return; await sendMessage({ type: 'markCardTouched', wb_sku: sku, wb_url: entry.wbUrl, source }); }
   private async refreshCardState(sku: string, statusEl: HTMLSpanElement): Promise<void> {
     try {
-      const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean }>({ type: 'getCardState', wb_sku: sku });
-      statusEl.textContent = state.rejected ? '×' : state.deferred ? '?' : state.activeAsinLinked ? 'A' : state.conflictPotential ? 'A!' : state.linked ? 'a' : (state.seenStatus === 'seen' || state.seenStatus === 'touched') ? '👁' : '·';
+      const state = await sendMessage<{ ok: boolean; linked: boolean; activeAsinLinked: boolean; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean; groupCount: number; groupPreview: string[] }>({ type: 'getCardState', wb_sku: sku });
+      statusEl.textContent =
+        state.activeAsinLinked ? 'A'
+          : state.conflictPotential ? 'A!'
+            : state.linked ? 'a'
+              : state.rejected ? '×'
+                : state.deferred ? '?'
+                  : state.groupCount > 0 ? '≡'
+                    : (state.seenStatus === 'seen' || state.seenStatus === 'touched') ? '👁' : '·';
+      statusEl.title = state.groupCount > 0 ? `Groups: ${state.groupPreview.join(', ')}` : '';
     } catch { statusEl.textContent = '○'; }
   }
 

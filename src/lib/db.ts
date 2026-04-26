@@ -50,7 +50,7 @@ function getKeyPath(store: StoreName): string {
     case 'wb_products': return 'wb_sku';
     case 'asin_links': return 'link_id';
     case 'groups': return 'group_id';
-    case 'group_members': return 'member_id';
+    case 'group_members': return 'membership_id';
     case 'events': return 'event_id';
     case 'meta': return 'schema_version';
     case 'debug_log': return 'debug_log_id';
@@ -95,8 +95,10 @@ function ensureIndexes(store: IDBObjectStore, storeName: StoreName): void {
       add('deleted_at', 'deleted_at');
       break;
     case 'group_members':
+      add('membership_id', 'membership_id', { unique: true });
       add('group_id', 'group_id');
       add('wb_sku', 'wb_sku');
+      add('group_id_wb_sku', ['group_id', 'wb_sku']);
       add('deleted_at', 'deleted_at');
       break;
     case 'debug_log':

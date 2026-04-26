@@ -1,7 +1,7 @@
 import { getAll, getAllByIndex, getByKey, putMany } from '../lib/db.js';
-import type { AmazonProduct, AsinLink, DebugEntry, EventRecord, MetaRecord, WbProduct } from '../lib/types.js';
+import type { AmazonProduct, AsinLink, DebugEntry, EventRecord, GroupMemberRecord, GroupRecord, MetaRecord, WbProduct } from '../lib/types.js';
 import { exportStateFiles } from './state.js';
-import { isActiveLink, normalizeLink, normalizeWbProduct, parseBooleanLike } from '../lib/normalize.js';
+import { isActiveLink, isDeleted, normalizeLink, normalizeWbProduct, parseBooleanLike } from '../lib/normalize.js';
 
 const CLIENT_ID = 'local-extension';
 const inFlightLinkOps = new Map<string, Promise<LinkResult>>();
@@ -36,7 +36,9 @@ type CardContext = {
 type UndoableAction =
   | { type: 'link_created'; wb_sku: string; asin: string; link_id: string }
   | { type: 'rejected_set'; wb_sku: string; prevRejected: string; prevReason: string }
-  | { type: 'deferred_set'; wb_sku: string; prevDeferred: string; prevReason: string };
+  | { type: 'deferred_set'; wb_sku: string; prevDeferred: string; prevReason: string }
+  | { type: 'group_added'; wb_sku: string; group_id: string; membership_id: string }
+  | { type: 'group_removed'; wb_sku: string; group_id: string; membership_id: string };
 
 function now(): string { return new Date().toISOString(); }
 function uid(prefix: string): string { return `${prefix}_${crypto.randomUUID()}`; }
@@ -221,6 +223,34 @@ export async function undoLastAction(): Promise<{ undone: boolean; action?: stri
     return { undone: true, action: 'rejected_set' };
   }
 
+  if (action.type === 'group_added') {
+    const membership = await getByKey<GroupMemberRecord>('group_members', action.membership_id);
+    if (membership && !isDeleted(membership)) {
+      membership.deleted_at = now();
+      membership.updated_at = now();
+      await putMany('group_members', [membership]);
+      await writeEvent('undo_performed', action.wb_sku, '', { undone_event: 'group_added', group_id: action.group_id, membership_id: action.membership_id }, action.group_id);
+      await log('undo_performed', { wb_sku: action.wb_sku, undone_event: 'group_added', group_id: action.group_id });
+      await log('card_state_updated', { wb_sku: action.wb_sku, group_removed: action.group_id });
+      return { undone: true, action: 'group_added' };
+    }
+    return { undone: false };
+  }
+
+  if (action.type === 'group_removed') {
+    const membership = await getByKey<GroupMemberRecord>('group_members', action.membership_id);
+    if (membership && isDeleted(membership)) {
+      membership.deleted_at = '';
+      membership.updated_at = now();
+      await putMany('group_members', [membership]);
+      await writeEvent('undo_performed', action.wb_sku, '', { undone_event: 'group_removed', group_id: action.group_id, membership_id: action.membership_id }, action.group_id);
+      await log('undo_performed', { wb_sku: action.wb_sku, undone_event: 'group_removed', group_id: action.group_id });
+      await log('card_state_updated', { wb_sku: action.wb_sku, group_added: action.group_id });
+      return { undone: true, action: 'group_removed' };
+    }
+    return { undone: false };
+  }
+
   product.deferred = action.prevDeferred; product.deferred_reason = action.prevReason; product.updated_at = now();
   await putMany('wb_products', [product]);
   await writeEvent('undo_performed', action.wb_sku, '', { undone_event: 'deferred_set' });
@@ -229,8 +259,92 @@ export async function undoLastAction(): Promise<{ undone: boolean; action?: stri
   return { undone: true, action: 'deferred_set' };
 }
 
-export async function getCardState(wb_sku: string): Promise<{ linked: boolean; activeAsinLinked: boolean; activeAsin: string; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean }> {
-  const [links, meta, wb] = await Promise.all([getAllByIndex<AsinLink>('asin_links', 'wb_sku', wb_sku), getMeta(), getWbProduct(wb_sku)]);
+export async function listGroups(): Promise<Array<GroupRecord & { product_count: number; already_in_group: boolean }>> {
+  const [groups, members] = await Promise.all([getAll<GroupRecord>('groups'), getAll<GroupMemberRecord>('group_members')]);
+  const activeMembers = members.filter((m) => !isDeleted(m));
+  const countByGroup = new Map<string, number>();
+  for (const member of activeMembers) countByGroup.set(member.group_id, (countByGroup.get(member.group_id) ?? 0) + 1);
+  return groups
+    .filter((group) => !isDeleted(group))
+    .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || '') || a.name.localeCompare(b.name))
+    .map((group) => ({ ...group, product_count: countByGroup.get(group.group_id) ?? 0, already_in_group: false }));
+}
+
+export async function searchGroups(query: string): Promise<Array<GroupRecord & { product_count: number; already_in_group: boolean }>> {
+  const normalized = query.trim().toLowerCase();
+  const all = await listGroups();
+  if (!normalized) return all;
+  return all.filter((group) => [group.name, group.comment, group.group_type, group.icon].some((v) => v.toLowerCase().includes(normalized)));
+}
+
+export async function createGroup(input: { name: string; icon?: string; comment?: string; group_type?: string }): Promise<GroupRecord> {
+  const ts = now();
+  const row: GroupRecord = {
+    group_id: uid('grp'),
+    name: input.name.trim(),
+    icon: (input.icon || '').trim(),
+    comment: (input.comment || '').trim(),
+    group_type: (input.group_type || '').trim(),
+    created_at: ts,
+    updated_at: ts,
+    deleted_at: ''
+  };
+  await putMany('groups', [row]);
+  await writeEvent('group_created', '', '', { group_id: row.group_id, name: row.name }, row.group_id);
+  await log('group_created', { group_id: row.group_id, name: row.name });
+  return row;
+}
+
+export async function addWbSkuToGroup(wb_sku: string, wb_url: string, group_id: string): Promise<{ status: 'added' | 'already_in_group'; membership?: GroupMemberRecord }> {
+  await upsertWbProduct(wb_sku, wb_url, { seen_status: 'touched' }, 'touched');
+  const [group, members] = await Promise.all([getByKey<GroupRecord>('groups', group_id), getAllByIndex<GroupMemberRecord>('group_members', 'group_id', group_id)]);
+  if (!group || isDeleted(group)) throw new Error('Group not found');
+  const existing = members.find((m) => m.group_id === group_id && m.wb_sku === wb_sku && !isDeleted(m));
+  if (existing) {
+    await writeEvent('duplicate_group_membership_skipped', wb_sku, '', { group_id, membership_id: existing.membership_id }, group_id);
+    await log('duplicate_group_membership_skipped', { wb_sku, group_id, membership_id: existing.membership_id });
+    return { status: 'already_in_group' };
+  }
+  const ts = now();
+  const membership: GroupMemberRecord = { membership_id: uid('gmem'), group_id, wb_sku, wb_url, created_at: ts, updated_at: ts, deleted_at: '' };
+  await putMany('group_members', [membership]);
+  await writeEvent('group_added', wb_sku, '', { group_id, membership_id: membership.membership_id, wb_url }, group_id);
+  await log('group_added', { wb_sku, group_id, membership_id: membership.membership_id });
+  await log('card_state_updated', { wb_sku, group_added: group_id });
+  lastUndoAction = { type: 'group_added', wb_sku, group_id, membership_id: membership.membership_id };
+  return { status: 'added', membership };
+}
+
+export async function removeWbSkuFromGroup(wb_sku: string, group_id: string): Promise<{ removed: boolean; membership_id?: string }> {
+  const members = await getAllByIndex<GroupMemberRecord>('group_members', 'group_id', group_id);
+  const active = members.find((m) => m.wb_sku === wb_sku && !isDeleted(m));
+  if (!active) return { removed: false };
+  active.deleted_at = now();
+  active.updated_at = now();
+  await putMany('group_members', [active]);
+  await writeEvent('group_removed', wb_sku, '', { group_id, membership_id: active.membership_id }, group_id);
+  await log('group_removed', { wb_sku, group_id, membership_id: active.membership_id });
+  await log('card_state_updated', { wb_sku, group_removed: group_id });
+  lastUndoAction = { type: 'group_removed', wb_sku, group_id, membership_id: active.membership_id };
+  return { removed: true, membership_id: active.membership_id };
+}
+
+export async function getGroupsForWbSku(wb_sku: string): Promise<Array<GroupRecord & { membership_id: string }>> {
+  const [groups, members] = await Promise.all([getAll<GroupRecord>('groups'), getAllByIndex<GroupMemberRecord>('group_members', 'wb_sku', wb_sku)]);
+  const groupById = new Map(groups.filter((g) => !isDeleted(g)).map((g) => [g.group_id, g]));
+  return members
+    .filter((m) => !isDeleted(m))
+    .map((m) => {
+      const group = groupById.get(m.group_id);
+      if (!group) return null;
+      return { membership_id: m.membership_id, ...group };
+    })
+    .filter((x): x is GroupRecord & { membership_id: string } => Boolean(x))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function getCardState(wb_sku: string): Promise<{ linked: boolean; activeAsinLinked: boolean; activeAsin: string; seenStatus: string; rejected: boolean; deferred: boolean; conflictPotential: boolean; groupCount: number; groupPreview: string[] }> {
+  const [links, meta, wb, skuGroups] = await Promise.all([getAllByIndex<AsinLink>('asin_links', 'wb_sku', wb_sku), getMeta(), getWbProduct(wb_sku), getGroupsForWbSku(wb_sku)]);
   const skuLinks = links.map(normalizeLink).filter((item) => item.wb_sku === wb_sku && isActiveLink(item));
   const activeAsinLinked = skuLinks.some((item) => item.asin === meta.active_asin);
   return {
@@ -240,7 +354,9 @@ export async function getCardState(wb_sku: string): Promise<{ linked: boolean; a
     seenStatus: wb?.seen_status ?? '',
     rejected: parseBooleanLike(wb?.rejected),
     deferred: parseBooleanLike(wb?.deferred),
-    conflictPotential: Boolean(meta.active_asin) && !activeAsinLinked && skuLinks.length > 0
+    conflictPotential: Boolean(meta.active_asin) && !activeAsinLinked && skuLinks.length > 0,
+    groupCount: skuGroups.length,
+    groupPreview: skuGroups.slice(0, 3).map((g) => g.name)
   };
 }
 
@@ -298,7 +414,7 @@ async function upsertWbProduct(wb_sku: string, wb_url: string, updates: Partial<
 function asLinkType(value: string): LinkType { return (LINK_TYPES as readonly string[]).includes(value) ? value as LinkType : 'candidate'; }
 function serializeReason(code: string, text: string): string { if (!text.trim()) return code; return `${code}: ${text.trim()}`; }
 
-async function writeEvent(event_type: string, wb_sku: string, asin: string, payload: Record<string, unknown>): Promise<void> {
-  const event: EventRecord = { event_id: uid('evt'), operation_id: uid('op'), event_type, wb_sku, asin, group_id: '', payload_json: JSON.stringify(payload), created_at: now(), client_id: CLIENT_ID };
+async function writeEvent(event_type: string, wb_sku: string, asin: string, payload: Record<string, unknown>, group_id = ''): Promise<void> {
+  const event: EventRecord = { event_id: uid('evt'), operation_id: uid('op'), event_type, wb_sku, asin, group_id, payload_json: JSON.stringify(payload), created_at: now(), client_id: CLIENT_ID };
   await putMany('events', [event]);
 }

@@ -1,6 +1,6 @@
 import { parseCsv } from '../lib/csv.js';
 import { clearStore, getAll, putMany } from '../lib/db.js';
-import { LINK_TYPES, getCardContext, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, linkWbSkuToAsin, markCardTouched, markSeenByHover, recordLinkCopied, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
+import { LINK_TYPES, addWbSkuToGroup, createGroup, getCardContext, getCardState, getGroupsForWbSku, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, linkWbSkuToAsin, listGroups, markCardTouched, markSeenByHover, recordLinkCopied, removeWbSkuFromGroup, searchGroups, setActiveAsin, setDefaultLinkType, setDeferred, setRejected, undoLastAction } from '../domain/actions.js';
 import { clearDatabaseWithLog, exportStateFiles, importStateFiles, repairDuplicateActiveLinks, restoreFromAllInOneBackup, validateAllInOneBackupPayload, validateLocalState } from '../domain/state.js';
 import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 import { shouldPersistDebug } from '../lib/logging.js';
@@ -22,6 +22,12 @@ type Request =
   | { type: 'setRejected'; wb_sku: string; wb_url: string; reasonCode: string; reasonText: string }
   | { type: 'setDeferred'; wb_sku: string; wb_url: string; reasonCode: string; reasonText: string }
   | { type: 'undoLastAction' }
+  | { type: 'listGroups' }
+  | { type: 'searchGroups'; query: string }
+  | { type: 'createGroup'; name: string; icon?: string; comment?: string; group_type?: string }
+  | { type: 'addWbSkuToGroup'; wb_sku: string; wb_url: string; group_id: string }
+  | { type: 'removeWbSkuFromGroup'; wb_sku: string; group_id: string }
+  | { type: 'getGroupsForWbSku'; wb_sku: string }
   | { type: 'getCardContext'; wb_sku: string; wb_url: string }
   | { type: 'exportState' }
   | { type: 'getExportData' }
@@ -52,12 +58,14 @@ export async function performAsinSearch(query: string): Promise<{ results: Amazo
   };
 }
 
-chrome.runtime.onMessage.addListener((message: Request, _sender: unknown, sendResponse: (response: unknown) => void) => {
-  void handleMessage(message)
-    .then((response) => sendResponse({ ok: true, ...response }))
-    .catch((error: unknown) => sendResponse({ ok: false, error: String(error) }));
-  return true;
-});
+if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage?.addListener) {
+  chrome.runtime.onMessage.addListener((message: Request, _sender: unknown, sendResponse: (response: unknown) => void) => {
+    void handleMessage(message)
+      .then((response) => sendResponse({ ok: true, ...response }))
+      .catch((error: unknown) => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  });
+}
 
 async function handleMessage(message: Request): Promise<Record<string, unknown>> {
   if (message.type === 'importAmazonCsv') {
@@ -142,6 +150,12 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
   if (message.type === 'undoLastAction') {
     return await undoLastAction();
   }
+  if (message.type === 'listGroups') return { groups: await listGroups() };
+  if (message.type === 'searchGroups') return { groups: await searchGroups(message.query) };
+  if (message.type === 'createGroup') return { group: await createGroup({ name: message.name, icon: message.icon, comment: message.comment, group_type: message.group_type }) };
+  if (message.type === 'addWbSkuToGroup') return await addWbSkuToGroup(message.wb_sku, message.wb_url, message.group_id);
+  if (message.type === 'removeWbSkuFromGroup') return await removeWbSkuFromGroup(message.wb_sku, message.group_id);
+  if (message.type === 'getGroupsForWbSku') return { groups: await getGroupsForWbSku(message.wb_sku) };
 
   if (message.type === 'getCardContext') {
     return { context: await getCardContext(message.wb_sku, message.wb_url) };
