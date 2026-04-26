@@ -44,6 +44,24 @@ export type AsinLink = {
   created_by_action: string;
 };
 
+export type GroupRecord = {
+  group_id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string;
+};
+
+export type GroupMemberRecord = {
+  member_id: string;
+  group_id: string;
+  wb_sku: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string;
+};
+
 export type EventRecord = {
   event_id: string;
   operation_id: string;
@@ -64,6 +82,7 @@ export type MetaRecord = {
   overlay_position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'auto';
   last_imported_at: string;
   last_exported_at: string;
+  verbose_scan_logging: 'true' | 'false';
 };
 
 export type DebugEntry = {

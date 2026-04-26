@@ -28,6 +28,7 @@ class OverlayManager {
   private readonly shadow: ShadowRoot;
   private readonly layer: HTMLDivElement;
   private readonly overlays = new Map<string, OverlayEntry>();
+  private readonly pendingLinks = new Set<string>();
   private updateQueued = false;
   private overlayPosition: OverlayPosition = 'top-left';
   private readonly cardSelectors = 'article, li, [data-nm-id], [class*="card"], [class*="product"], [class*="goods"]';
@@ -206,13 +207,26 @@ class OverlayManager {
   private async handleLinkClick(sku: string): Promise<void> {
     const entry = this.overlays.get(sku);
     if (!entry) return;
+    if (this.pendingLinks.has(sku)) return;
+
+    this.pendingLinks.add(sku);
+    entry.buttonElement.disabled = true;
+    entry.buttonElement.textContent = '...';
     try {
-      await sendMessage<{ ok: boolean }>({ type: 'linkSku', wb_sku: sku, wb_url: entry.wbUrl });
-      this.setMarker(entry, 'A');
+      const response = await sendMessage<{ ok: boolean; result: { status: 'created' | 'duplicate_skipped' } }>({ type: 'linkSku', wb_sku: sku, wb_url: entry.wbUrl });
+      if (response.result?.status === 'duplicate_skipped') {
+        this.setMarker(entry, 'a');
+      } else {
+        this.setMarker(entry, 'A');
+      }
       await this.refreshCardState(sku, entry.statusElement);
     } catch (error) {
       this.setMarker(entry, '!');
       await logContent('link_click_error', { sku, error: String(error) });
+    } finally {
+      entry.buttonElement.disabled = false;
+      entry.buttonElement.textContent = 'A+';
+      this.pendingLinks.delete(sku);
     }
   }
 
@@ -273,6 +287,7 @@ class OverlayManager {
         padding: 4px 7px;
         cursor: pointer;
       }
+      .wb-amz-btn:disabled { opacity: 0.6; cursor: wait; }
       .wb-amz-status {
         color: #5f20d4;
         font-size: 11px;
@@ -315,16 +330,24 @@ async function startContentScript(): Promise<void> {
     return false;
   });
 
-  const onChange = (reason: string): void => {
-    scan(manager, reason);
+  let pendingReason = 'initial';
+  let scanTimer: number | null = null;
+  const scheduleScan = (reason: string): void => {
+    pendingReason = reason === 'popup_force_scan' ? reason : pendingReason === 'popup_force_scan' ? pendingReason : reason;
+    if (scanTimer !== null) return;
+    scanTimer = window.setTimeout(() => {
+      scan(manager, pendingReason);
+      pendingReason = 'idle';
+      scanTimer = null;
+    }, reason === 'popup_force_scan' ? 0 : 350);
   };
 
-  const observer = new MutationObserver(() => onChange('mutation'));
+  const observer = new MutationObserver(() => scheduleScan('mutation'));
   observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener('scroll', () => onChange('scroll'), { passive: true });
+  window.addEventListener('scroll', () => scheduleScan('scroll'), { passive: true });
   window.addEventListener('resize', () => manager.schedulePositionUpdate('resize'));
-  setInterval(() => onChange('interval'), 3000);
-  onChange('initial');
+  setInterval(() => scheduleScan('interval'), 8000);
+  scheduleScan('initial');
 }
 
 type ScanStats = { linksFound: number; skuExtracted: number; overlaysInjected: number; sampleSkus: string[] };
@@ -362,8 +385,9 @@ function scan(manager: OverlayManager, reason: string): ScanStats {
 
   stats.overlaysInjected = Math.max(0, manager.getOverlayCount() - before);
   manager.schedulePositionUpdate(reason);
-  void logContent('product_links_found', { reason, count: stats.linksFound });
-  void logContent('sku_extracted', { reason, count: stats.skuExtracted, sample_skus: stats.sampleSkus });
+  if (reason === 'popup_force_scan' || reason === 'initial' || reason === 'interval') {
+    void logContent('scan_samples', { reason, count: stats.skuExtracted, sample_skus: stats.sampleSkus });
+  }
   return stats;
 }
 

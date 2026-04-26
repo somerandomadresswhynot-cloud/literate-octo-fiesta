@@ -2,6 +2,7 @@ declare const chrome: {
   runtime: {
     lastError?: { message: string };
     sendMessage: (message: unknown, callback: (response: any) => void) => void;
+    getManifest: () => { version: string };
     onMessage: {
       addListener: (
         callback: (
