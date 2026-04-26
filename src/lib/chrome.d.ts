@@ -12,4 +12,8 @@ declare const chrome: {
       ) => void;
     };
   };
+  tabs: {
+    query: (queryInfo: { active?: boolean; currentWindow?: boolean }, callback?: (tabs: Array<{ id?: number }>) => void) => Promise<Array<{ id?: number }>>;
+    sendMessage: (tabId: number, message: unknown, callback?: (response?: any) => void) => void;
+  };
 };

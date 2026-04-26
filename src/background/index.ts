@@ -1,7 +1,7 @@
 import { parseCsv } from '../lib/csv.js';
-import { getAll, clearDb } from '../lib/db.js';
+import { clearDb, getAll, putMany } from '../lib/db.js';
 import { exportCsvState, getCardState, getMeta, importAmazonProducts, linkWbSkuToActiveAsin, setActiveAsin } from '../domain/actions.js';
-import type { AmazonProduct } from '../lib/types.js';
+import type { AmazonProduct, DebugEntry } from '../lib/types.js';
 
 type Request =
   | { type: 'importAmazonCsv'; csvText: string }
@@ -12,7 +12,8 @@ type Request =
   | { type: 'getCardState'; wb_sku: string }
   | { type: 'exportState' }
   | { type: 'storageSummary' }
-  | { type: 'clearDb' };
+  | { type: 'clearDb' }
+  | { type: 'logDebug'; level?: 'info' | 'error'; action: string; details?: Record<string, unknown> };
 
 chrome.runtime.onMessage.addListener((message: Request, _sender: unknown, sendResponse: (response: unknown) => void) => {
   void handleMessage(message)
@@ -72,6 +73,17 @@ async function handleMessage(message: Request): Promise<Record<string, unknown>>
       getMeta()
     ]);
     return { summary: { amazon: amazon.length, wb: wb.length, links: links.length, events: events.length, activeAsin: meta.active_asin } };
+  }
+
+  if (message.type === 'logDebug') {
+    const entry: DebugEntry = {
+      ts: new Date().toISOString(),
+      level: message.level ?? 'info',
+      action: message.action,
+      details: message.details ?? {}
+    };
+    await putMany('debug_log', [entry]);
+    return {};
   }
 
   if (message.type === 'clearDb') {
